@@ -2287,6 +2287,213 @@
                                 </div>
                             </div>
 
+                            <!-- HTTP Headers配置 -->
+                            <div class="md:col-span-2 mt-4">
+                                <div
+                                    class="flex justify-between items-center mb-2"
+                                >
+                                    <h4 class="font-semibold">
+                                        HTTP Headers覆盖（可选）
+                                    </h4>
+                                    <button
+                                        type="button"
+                                        @click="showHeadersHelp = !showHeadersHelp"
+                                        class="text-gray-400 hover:text-gray-600"
+                                    >
+                                        <svg
+                                            class="w-4 h-4"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            viewBox="0 0 24 24"
+                                        >
+                                            <path
+                                                stroke-linecap="round"
+                                                stroke-linejoin="round"
+                                                stroke-width="2"
+                                                d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                                            ></path>
+                                        </svg>
+                                    </button>
+                                </div>
+
+                                <!-- 帮助信息 -->
+                                <div
+                                    x-show="showHeadersHelp"
+                                    x-collapse
+                                    class="mb-3 p-3 bg-blue-50 border border-blue-200 rounded-md text-sm text-blue-700"
+                                >
+                                    <p class="mb-2">
+                                        <strong>HTTP Headers覆盖功能说明：</strong>
+                                    </p>
+                                    <ul class="list-disc list-inside space-y-1">
+                                        <li>
+                                            可以为该分组设置默认的HTTP headers，这些headers会覆盖请求中的对应headers
+                                        </li>
+                                        <li>
+                                            常用于：Authorization（认证）、X-Custom-Header（自定义头）、anthropic-version（Anthropic版本）等
+                                        </li>
+                                        <li>
+                                            支持两种方式：<strong>逐个添加</strong>和<strong>JSON批量导入</strong>
+                                        </li>
+                                        <li>
+                                            JSON格式示例：{"Authorization": "Bearer sk-xxx", "X-Custom-Header": "value"}
+                                        </li>
+                                        <li>
+                                            留空表示不覆盖任何headers，使用请求中的原始headers
+                                        </li>
+                                    </ul>
+                                </div>
+
+                                <!-- JSON批量导入区域 -->
+                                <div class="mb-4 p-4 bg-gray-50 border border-gray-200 rounded-md">
+                                    <div class="flex items-center justify-between mb-2">
+                                        <h5 class="font-semibold text-gray-700">JSON批量导入</h5>
+                                        <div class="flex space-x-2">
+                                            <button
+                                                type="button"
+                                                @click="parseHeadersJson()"
+                                                :disabled="!headersJsonText.trim() || headersJsonValidationError"
+                                                class="px-3 py-1 text-sm bg-green-500 hover:bg-green-600 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                                            >
+                                                导入Headers
+                                            </button>
+                                            <button
+                                                type="button"
+                                                @click="clearAllHeaders()"
+                                                :disabled="headers.length === 0"
+                                                class="px-3 py-1 text-sm bg-red-500 hover:bg-red-600 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                                            >
+                                                清空所有
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <textarea
+                                        x-model="headersJsonText"
+                                        @input="validateHeadersJson()"
+                                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                                        rows="4"
+                                        placeholder='{"Authorization": "Bearer sk-xxx", "X-Custom-Header": "value"}'
+                                    ></textarea>
+                                    <p class="text-sm text-gray-500 mt-1">
+                                        输入JSON格式的headers，支持批量添加和覆盖
+                                    </p>
+                                    <!-- JSON验证状态 -->
+                                    <div
+                                        x-show="headersJsonValidationMessage"
+                                        class="mt-2"
+                                    >
+                                        <div
+                                            :class="headersJsonValidationError ? 'text-red-600' : 'text-green-600'"
+                                            class="text-sm flex items-center"
+                                        >
+                                            <svg
+                                                class="w-4 h-4 mr-1"
+                                                fill="none"
+                                                stroke="currentColor"
+                                                viewBox="0 0 24 24"
+                                            >
+                                                <path
+                                                    x-show="headersJsonValidationError"
+                                                    stroke-linecap="round"
+                                                    stroke-linejoin="round"
+                                                    stroke-width="2"
+                                                    d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                                                ></path>
+                                                <path
+                                                    x-show="!headersJsonValidationError"
+                                                    stroke-linecap="round"
+                                                    stroke-linejoin="round"
+                                                    stroke-width="2"
+                                                    d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                                                ></path>
+                                            </svg>
+                                            <span
+                                                x-text="headersJsonValidationMessage"
+                                            ></span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Headers列表 -->
+                                <div class="space-y-2">
+                                    <template
+                                        x-for="(header, index) in headers"
+                                        :key="index"
+                                    >
+                                        <div
+                                            class="flex items-center space-x-2 p-2 border border-gray-200 rounded-md"
+                                        >
+                                            <div class="flex-1">
+                                                <label
+                                                    class="block text-xs text-gray-500 mb-1"
+                                                    >Header Key</label
+                                                >
+                                                <input
+                                                    type="text"
+                                                    x-model="header.key"
+                                                    placeholder="例如: Authorization"
+                                                    @input="syncHeadersToGroupForm()"
+                                                />
+                                            </div>
+                                            <div class="text-gray-400">:</div>
+                                            <div class="flex-1">
+                                                <label
+                                                    class="block text-xs text-gray-500 mb-1"
+                                                    >Header Value</label
+                                                >
+                                                <input
+                                                    type="text"
+                                                    x-model="header.value"
+                                                    placeholder="例如: Bearer sk-xxx"
+                                                    @input="syncHeadersToGroupForm()"
+                                                />
+                                            </div>
+                                            <button
+                                                type="button"
+                                                @click="removeHeader(index)"
+                                                class="text-red-500 hover:text-red-700 p-1"
+                                            >
+                                                <svg
+                                                    class="w-4 h-4"
+                                                    fill="none"
+                                                    stroke="currentColor"
+                                                    viewBox="0 0 24 24"
+                                                >
+                                                    <path
+                                                        stroke-linecap="round"
+                                                        stroke-linejoin="round"
+                                                        stroke-width="2"
+                                                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                                                    ></path>
+                                                </svg>
+                                            </button>
+                                        </div>
+                                    </template>
+
+                                    <!-- 添加新Header按钮 -->
+                                    <button
+                                        type="button"
+                                        @click="addHeader()"
+                                        class="w-full py-2 px-4 border-2 border-dashed border-gray-300 rounded-md text-gray-500 hover:border-gray-400 hover:text-gray-600 transition-colors"
+                                    >
+                                        <svg
+                                            class="w-4 h-4 inline mr-2"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            viewBox="0 0 24 24"
+                                        >
+                                            <path
+                                                stroke-linecap="round"
+                                                stroke-linejoin="round"
+                                                stroke-width="2"
+                                                d="M12 4v16m8-8H4"
+                                            ></path>
+                                        </svg>
+                                        添加Header
+                                    </button>
+                                </div>
+                            </div>
+
                             <!-- 模型重命名配置 -->
                             <div class="md:col-span-2 mt-4">
                                 <div
@@ -3890,8 +4097,16 @@
                         models: [],
                         use_native_response: false,
                         rpm_limit: 0,
+                        headers: {}, // HTTP headers
                     },
                     modelsText: "",
+
+                    // Headers参数相关
+                    headers: [], // 当前编辑的headers（key-value对象数组）
+                    showHeadersHelp: false,
+                    headersJsonText: "", // JSON格式的headers输入
+                    headersJsonValidationMessage: "",
+                    headersJsonValidationError: false,
 
                     // JSON请求参数相关
                     requestParamsText: "",
@@ -4735,11 +4950,15 @@
                                 ),
                                 rpm_limit:
                                     parseInt(fullGroupData.rpm_limit) || 0,
+                                headers: fullGroupData.headers || {},
                             };
 
                             this.modelsText = (fullGroupData.models || []).join(
                                 "\n",
                             );
+
+                            // 加载Headers
+                            this.loadHeadersFromGroup(fullGroupData);
 
                             // 加载JSON请求参数
                             if (
@@ -5031,6 +5250,9 @@
                                                 request_params:
                                                     this.groupFormData
                                                         .request_params,
+                                                headers:
+                                                    this.groupFormData
+                                                        .headers,
                                                 enabled:
                                                     this.groupFormData.enabled,
                                                 rotation_strategy:
@@ -5111,6 +5333,7 @@
                             models: [],
                             use_native_response: false,
                             rpm_limit: 0,
+                            headers: {},
                         };
                         this.modelsText = "";
                         this.selectedKeys = [];
@@ -5123,6 +5346,13 @@
                         this.invalidKeyIndexes = [];
                         this.forcingKeyStatus = {};
                         this.bulkDeletingInvalidKeys = false;
+
+                        // 重置Headers相关字段
+                        this.headers = [];
+                        this.showHeadersHelp = false;
+                        this.headersJsonText = "";
+                        this.headersJsonValidationMessage = "";
+                        this.headersJsonValidationError = false;
 
                         // 重置JSON参数相关字段
                         this.requestParamsText = "";
@@ -6216,6 +6446,125 @@
                     // 移除模型映射
                     removeModelMapping(index) {
                         this.modelMappings.splice(index, 1);
+                    },
+
+                    // 添加Header
+                    addHeader() {
+                        this.headers.push({ key: "", value: "" });
+                        this.syncHeadersToGroupForm();
+                    },
+
+                    // 移除Header
+                    removeHeader(index) {
+                        this.headers.splice(index, 1);
+                        this.syncHeadersToGroupForm();
+                    },
+
+                    // 同步headers到groupFormData
+                    syncHeadersToGroupForm() {
+                        const headersMap = {};
+                        this.headers.forEach(header => {
+                            if (header.key && header.key.trim() && header.value && header.value.trim()) {
+                                headersMap[header.key.trim()] = header.value.trim();
+                            }
+                        });
+                        this.groupFormData.headers = headersMap;
+                    },
+
+                    // 加载分组数据时解析headers
+                    loadHeadersFromGroup(groupData) {
+                        this.headers = [];
+                        if (groupData.headers && typeof groupData.headers === 'object') {
+                            Object.entries(groupData.headers).forEach(([key, value]) => {
+                                this.headers.push({ key: key, value: value });
+                            });
+                        }
+                        if (this.headers.length === 0) {
+                            this.headers.push({ key: "", value: "" });
+                        }
+                        this.syncHeadersToGroupForm();
+                    },
+
+                    // 验证Headers JSON格式
+                    validateHeadersJson() {
+                        const text = this.headersJsonText.trim();
+                        if (!text) {
+                            this.headersJsonValidationMessage = "";
+                            this.headersJsonValidationError = false;
+                            return;
+                        }
+
+                        try {
+                            const parsed = JSON.parse(text);
+                            if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+                                this.headersJsonValidationMessage = "JSON必须是对象格式，如 {\"key\": \"value\"}";
+                                this.headersJsonValidationError = true;
+                                return;
+                            }
+
+                            // 检查所有值都是字符串
+                            const nonStringValues = Object.entries(parsed).filter(([key, value]) => typeof value !== 'string');
+                            if (nonStringValues.length > 0) {
+                                this.headersJsonValidationMessage = "所有header值都必须是字符串格式";
+                                this.headersJsonValidationError = true;
+                                return;
+                            }
+
+                            const keyCount = Object.keys(parsed).length;
+                            this.headersJsonValidationMessage = `JSON格式正确，包含 ${keyCount} 个header`;
+                            this.headersJsonValidationError = false;
+                        } catch (e) {
+                            this.headersJsonValidationMessage = "JSON格式错误: " + e.message;
+                            this.headersJsonValidationError = true;
+                        }
+                    },
+
+                    // 解析并导入Headers JSON
+                    parseHeadersJson() {
+                        if (!this.headersJsonText.trim() || this.headersJsonValidationError) {
+                            return;
+                        }
+
+                        try {
+                            const parsed = JSON.parse(this.headersJsonText);
+                            if (typeof parsed !== 'object' || parsed === null) {
+                                throw new Error("JSON必须是对象格式");
+                            }
+
+                            // 清空现有headers并导入新的
+                            this.headers = [];
+                            Object.entries(parsed).forEach(([key, value]) => {
+                                if (key && key.trim() && value && value.toString().trim()) {
+                                    this.headers.push({
+                                        key: key.trim(),
+                                        value: value.toString().trim()
+                                    });
+                                }
+                            });
+
+                            // 如果没有有效的headers，至少保留一个空行
+                            if (this.headers.length === 0) {
+                                this.headers.push({ key: "", value: "" });
+                            }
+
+                            this.syncHeadersToGroupForm();
+                            this.headersJsonValidationMessage = `成功导入 ${this.headers.length} 个headers`;
+                            this.headersJsonValidationError = false;
+                        } catch (e) {
+                            this.headersJsonValidationMessage = "导入失败: " + e.message;
+                            this.headersJsonValidationError = true;
+                        }
+                    },
+
+                    // 清空所有headers
+                    clearAllHeaders() {
+                        if (confirm("确定要清空所有headers吗？此操作不可恢复。")) {
+                            this.headers = [{ key: "", value: "" }];
+                            this.headersJsonText = "";
+                            this.headersJsonValidationMessage = "";
+                            this.headersJsonValidationError = false;
+                            this.syncHeadersToGroupForm();
+                        }
                     },
 
                     // 检查是否是重复的别名

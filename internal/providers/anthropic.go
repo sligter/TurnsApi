@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -72,9 +73,20 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req *ChatComplet
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform request: %w", err)
 	}
-	
-	endpoint := fmt.Sprintf("%s/v1/messages", p.Config.BaseURL)
-	
+
+	// 构建端点URL - 检查BaseURL是否已经包含路径
+	baseURL := strings.TrimRight(p.Config.BaseURL, "/")
+	var endpoint string
+	if strings.HasSuffix(baseURL, "/v1") {
+		// 如果BaseURL以/v1结尾，直接拼接messages
+		endpoint = baseURL + "/messages"
+	} else {
+		// 否则拼接完整的/v1/messages路径
+		endpoint = baseURL + "/v1/messages"
+	}
+
+	log.Printf("🔧 Anthropic ChatCompletion - BaseURL: %s, Endpoint: %s, APIKey: %s****", p.Config.BaseURL, endpoint, p.Config.APIKey[:4])
+
 	reqBody, err := json.Marshal(anthropicReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
@@ -102,10 +114,13 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req *ChatComplet
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
+	// 读取响应体以供日志使用
+	bodyBytes, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		// 记录详细错误信息
+		return nil, fmt.Errorf("API request failed with status %d: %s. Headers: %v", resp.StatusCode, string(bodyBytes), httpReq.Header)
 	}
 	
 	var anthropicResp AnthropicResponse
@@ -125,8 +140,17 @@ func (p *AnthropicProvider) ChatCompletionStream(ctx context.Context, req *ChatC
 		return nil, fmt.Errorf("failed to transform request: %w", err)
 	}
 	anthropicReq.Stream = true
-	
-	endpoint := fmt.Sprintf("%s/v1/messages", p.Config.BaseURL)
+
+	// 构建端点URL - 检查BaseURL是否已经包含路径
+	baseURL := strings.TrimRight(p.Config.BaseURL, "/")
+	var endpoint string
+	if strings.HasSuffix(baseURL, "/v1") {
+		// 如果BaseURL以/v1结尾，直接拼接messages
+		endpoint = baseURL + "/messages"
+	} else {
+		// 否则拼接完整的/v1/messages路径
+		endpoint = baseURL + "/v1/messages"
+	}
 	
 	reqBody, err := json.Marshal(anthropicReq)
 	if err != nil {
@@ -156,11 +180,13 @@ func (p *AnthropicProvider) ChatCompletionStream(ctx context.Context, req *ChatC
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		// 记录详细错误信息
 		resp.Body.Close()
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("API request failed with status %d: %s. Headers: %v", resp.StatusCode, string(bodyBytes), httpReq.Header)
 	}
 	
 	streamChan := make(chan StreamResponse, 10)
@@ -272,8 +298,17 @@ func (p *AnthropicProvider) ChatCompletionStreamNative(ctx context.Context, req 
 		return nil, fmt.Errorf("failed to transform request: %w", err)
 	}
 	anthropicReq.Stream = true
-	
-	endpoint := fmt.Sprintf("%s/v1/messages", p.Config.BaseURL)
+
+	// 构建端点URL - 检查BaseURL是否已经包含路径
+	baseURL := strings.TrimRight(p.Config.BaseURL, "/")
+	var endpoint string
+	if strings.HasSuffix(baseURL, "/v1") {
+		// 如果BaseURL以/v1结尾，直接拼接messages
+		endpoint = baseURL + "/messages"
+	} else {
+		// 否则拼接完整的/v1/messages路径
+		endpoint = baseURL + "/v1/messages"
+	}
 	
 	reqBody, err := json.Marshal(anthropicReq)
 	if err != nil {
@@ -303,11 +338,13 @@ func (p *AnthropicProvider) ChatCompletionStreamNative(ctx context.Context, req 
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		// 记录详细错误信息
 		resp.Body.Close()
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("API request failed with status %d: %s. Headers: %v", resp.StatusCode, string(bodyBytes), httpReq.Header)
 	}
 	
 	streamChan := make(chan StreamResponse, 10)
@@ -363,7 +400,15 @@ func (p *AnthropicProvider) ChatCompletionStreamNative(ctx context.Context, req 
 // GetModels 获取可用模型列表
 func (p *AnthropicProvider) GetModels(ctx context.Context) (interface{}, error) {
 	// 使用Anthropic官方的模型列表API
-	endpoint := fmt.Sprintf("%s/v1/models", p.Config.BaseURL)
+	baseURL := strings.TrimRight(p.Config.BaseURL, "/")
+	var endpoint string
+	if strings.HasSuffix(baseURL, "/v1") {
+		// 如果BaseURL以/v1结尾，直接拼接models
+		endpoint = baseURL + "/models"
+	} else {
+		// 否则拼接完整的/v1/models路径
+		endpoint = baseURL + "/v1/models"
+	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
@@ -437,7 +482,15 @@ func (p *AnthropicProvider) GetModels(ctx context.Context) (interface{}, error) 
 // HealthCheck 健康检查
 func (p *AnthropicProvider) HealthCheck(ctx context.Context) error {
 	// 使用模型列表API进行健康检查，这是一个轻量级的操作
-	endpoint := fmt.Sprintf("%s/v1/models", p.Config.BaseURL)
+	baseURL := strings.TrimRight(p.Config.BaseURL, "/")
+	var endpoint string
+	if strings.HasSuffix(baseURL, "/v1") {
+		// 如果BaseURL以/v1结尾，直接拼接models
+		endpoint = baseURL + "/models"
+	} else {
+		// 否则拼接完整的/v1/models路径
+		endpoint = baseURL + "/v1/models"
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {

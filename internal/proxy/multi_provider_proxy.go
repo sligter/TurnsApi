@@ -695,6 +695,13 @@ func (p *MultiProviderProxy) handleNonStreamingRequest(
 	originalModel := req.Model
 	req.Model = p.providerRouter.ResolveModelName(req.Model, routeResult.GroupID)
 
+	// 输出详细的API调用信息用于调试
+	log.Printf("🚀 发送API请求 - 分组: %s, 模型: %s, BaseURL: %s, ProviderType: %s",
+		routeResult.GroupID, req.Model, routeResult.ProviderConfig.BaseURL, routeResult.ProviderConfig.ProviderType)
+	log.Printf("📋 请求参数 - MaxTokens: %v, Temperature: %v, TopP: %v, Messages: %d",
+		req.MaxTokens, req.Temperature, req.TopP, len(req.Messages))
+	log.Printf("🔑 Headers - %v", routeResult.ProviderConfig.Headers)
+
 	// 发送请求到提供商
 	response, err := routeResult.Provider.ChatCompletion(ctx, req)
 

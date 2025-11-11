@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(if:*)",
+      "Bash(then:*)",
+      "Bash(else:*)",
+      "Bash(fi:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
