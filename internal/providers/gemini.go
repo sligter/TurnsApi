@@ -477,28 +477,49 @@ func (p *GeminiProvider) GetModels(ctx context.Context) (interface{}, error) {
 func (p *GeminiProvider) getDefaultModels() map[string]interface{} {
 	models := []map[string]interface{}{
 		{
-			"id":       "gemini-2.5-flash",
-			"object":   "model",
-			"created":  time.Now().Unix(),
-			"owned_by": "google",
+			"id":             "gemini-2.5-flash",
+			"object":         "model",
+			"created":        time.Now().Unix(),
+			"owned_by":       "google",
+			"display_name":   "Gemini 2.5 Flash",
+			"capabilities":   []string{"chat", "vision", "function_calling"},
+			"context_window": 1000000,
 		},
 		{
-			"id":       "gemini-2.5-pro",
-			"object":   "model",
-			"created":  time.Now().Unix(),
-			"owned_by": "google",
+			"id":             "gemini-2.5-pro",
+			"object":         "model",
+			"created":        time.Now().Unix(),
+			"owned_by":       "google",
+			"display_name":   "Gemini 2.5 Pro",
+			"capabilities":   []string{"chat", "vision", "function_calling"},
+			"context_window": 2000000,
 		},
 		{
-			"id":       "gemini-pro",
-			"object":   "model",
-			"created":  time.Now().Unix(),
-			"owned_by": "google",
+			"id":             "gemini-2.0-flash-exp",
+			"object":         "model",
+			"created":        time.Now().Unix(),
+			"owned_by":       "google",
+			"display_name":   "Gemini 2.0 Flash (Experimental)",
+			"capabilities":   []string{"chat", "vision", "function_calling"},
+			"context_window": 1000000,
 		},
 		{
-			"id":       "gemini-pro-vision",
-			"object":   "model",
-			"created":  time.Now().Unix(),
-			"owned_by": "google",
+			"id":             "gemini-pro",
+			"object":         "model",
+			"created":        time.Now().Unix(),
+			"owned_by":       "google",
+			"display_name":   "Gemini Pro",
+			"capabilities":   []string{"chat"},
+			"context_window": 32000,
+		},
+		{
+			"id":             "gemini-pro-vision",
+			"object":         "model",
+			"created":        time.Now().Unix(),
+			"owned_by":       "google",
+			"display_name":   "Gemini Pro Vision",
+			"capabilities":   []string{"chat", "vision"},
+			"context_window": 16000,
 		},
 	}
 
@@ -571,16 +592,87 @@ func (p *GeminiProvider) fetchModelsFromAPI(ctx context.Context) ([]map[string]i
 				modelID = strings.TrimPrefix(modelID, "models/")
 			}
 
+			// 推断模型能力
+			capabilities := inferGeminiCapabilities(modelID, model.SupportedGenerationMethods)
+
+			// 使用API返回的token限制
+			contextWindow := model.InputTokenLimit
+			if contextWindow == 0 {
+				contextWindow = inferGeminiContextWindow(modelID)
+			}
+
 			models = append(models, map[string]interface{}{
-				"id":       modelID,
-				"object":   "model",
-				"created":  time.Now().Unix(),
-				"owned_by": "google",
+				"id":             modelID,
+				"object":         "model",
+				"created":        time.Now().Unix(),
+				"owned_by":       "google",
+				"display_name":   model.DisplayName,
+				"description":    model.Description,
+				"capabilities":   capabilities,
+				"context_window": contextWindow,
 			})
 		}
 	}
 
 	return models, nil
+}
+
+// inferGeminiCapabilities 根据模型ID和支持的方法推断能力
+func inferGeminiCapabilities(modelID string, supportedMethods []string) []string {
+	capabilities := []string{"chat"}
+
+	// 检查是否支持视觉
+	if strings.Contains(modelID, "vision") || strings.Contains(modelID, "gemini-2") || strings.Contains(modelID, "gemini-1.5") {
+		capabilities = append(capabilities, "vision")
+	}
+
+	// Gemini 1.5 和 2.x 系列支持函数调用
+	if strings.Contains(modelID, "gemini-1.5") || strings.Contains(modelID, "gemini-2") {
+		capabilities = append(capabilities, "function_calling")
+	}
+
+	return capabilities
+}
+
+// inferGeminiContextWindow 根据模型ID推断上下文窗口
+func inferGeminiContextWindow(modelID string) int {
+	// Gemini 2.5 Pro: 2M tokens
+	if strings.Contains(modelID, "gemini-2.5-pro") {
+		return 2000000
+	}
+
+	// Gemini 2.5 Flash: 1M tokens
+	if strings.Contains(modelID, "gemini-2.5-flash") {
+		return 1000000
+	}
+
+	// Gemini 2.0 Flash: 1M tokens
+	if strings.Contains(modelID, "gemini-2.0-flash") {
+		return 1000000
+	}
+
+	// Gemini 1.5 Pro: 2M tokens
+	if strings.Contains(modelID, "gemini-1.5-pro") {
+		return 2000000
+	}
+
+	// Gemini 1.5 Flash: 1M tokens
+	if strings.Contains(modelID, "gemini-1.5-flash") {
+		return 1000000
+	}
+
+	// Gemini Pro Vision: 16K tokens
+	if strings.Contains(modelID, "gemini-pro-vision") {
+		return 16000
+	}
+
+	// Gemini Pro: 32K tokens
+	if strings.Contains(modelID, "gemini-pro") {
+		return 32000
+	}
+
+	// 默认值
+	return 32000
 }
 
 // HealthCheck 健康检查

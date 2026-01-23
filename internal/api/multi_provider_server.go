@@ -17,6 +17,7 @@ import (
 
 	"turnsapi/internal"
 	"turnsapi/internal/auth"
+	"turnsapi/internal/cache"
 	"turnsapi/internal/health"
 	"turnsapi/internal/keymanager"
 	"turnsapi/internal/logger"
@@ -38,6 +39,7 @@ type MultiProviderServer struct {
 	proxyKeyManager *proxykey.Manager
 	requestLogger   *logger.RequestLogger
 	healthChecker   *health.MultiProviderHealthChecker
+	modelCache      *cache.ModelCache
 	router          *gin.Engine
 	httpServer      *http.Server
 	startTime       time.Time
@@ -98,6 +100,7 @@ func NewMultiProviderServer(configManager *internal.ConfigManager, keyManager *k
 		authManager:     auth.NewAuthManager(config),
 		proxyKeyManager: proxyKeyManager,
 		requestLogger:   requestLogger,
+		modelCache:      cache.NewModelCache(5 * time.Minute), // 5 minute TTL
 		router:          gin.New(),
 		startTime:       time.Now(),
 	}
@@ -1052,6 +1055,20 @@ func (s *MultiProviderServer) handleAvailableModels(c *gin.Context) {
 		return
 	}
 
+	// 检查是否强制刷新（绕过缓存）
+	forceRefresh := c.Query("refresh") == "true"
+
+	// 生成缓存键
+	cacheKey := cache.GenerateCacheKey(group.ProviderType, group.BaseURL, group.APIKeys[0])
+
+	// 如果不是强制刷新，尝试从缓存获取
+	if !forceRefresh {
+		if cachedData, found := s.modelCache.Get(cacheKey); found {
+			c.JSON(http.StatusOK, cachedData)
+			return
+		}
+	}
+
 	// 创建提供商配置
 	providerConfig := &providers.ProviderConfig{
 		BaseURL:      group.BaseURL,
@@ -1080,11 +1097,26 @@ func (s *MultiProviderServer) handleAvailableModels(c *gin.Context) {
 	ctx := c.Request.Context()
 	rawModels, err := provider.GetModels(ctx)
 	if err != nil {
+		errorMsg := "Failed to get models: " + err.Error()
+		suggestedAction := ""
+
+		// 提供具体的建议
+		if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline exceeded") {
+			suggestedAction = "The request timed out. Try increasing the timeout value or check your network connection."
+		} else if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "Unauthorized") {
+			suggestedAction = "Authentication failed. Please verify your API key is correct and has the necessary permissions."
+		} else if strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "rate limit") {
+			suggestedAction = "Rate limit exceeded. Please wait a moment and try again."
+		} else if strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "no such host") {
+			suggestedAction = "Cannot connect to the API endpoint. Please verify the Base URL is correct."
+		}
+
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"error": gin.H{
-				"message": "Failed to get models: " + err.Error(),
-				"type":    "models_fetch_failed",
-				"code":    "models_fetch_failed",
+				"message":    errorMsg,
+				"type":       "models_fetch_failed",
+				"code":       "models_fetch_failed",
+				"suggestion": suggestedAction,
 			},
 		})
 		return
@@ -1093,8 +1125,8 @@ func (s *MultiProviderServer) handleAvailableModels(c *gin.Context) {
 	// 标准化模型数据格式
 	standardizedModels := s.proxy.StandardizeModelsResponse(rawModels, group.ProviderType)
 
-	// 返回结果
-	c.JSON(http.StatusOK, gin.H{
+	// 构建响应
+	response := gin.H{
 		"object": "list",
 		"data": map[string]interface{}{
 			groupID: map[string]interface{}{
@@ -1103,7 +1135,13 @@ func (s *MultiProviderServer) handleAvailableModels(c *gin.Context) {
 				"models":        standardizedModels,
 			},
 		},
-	})
+	}
+
+	// 缓存结果
+	s.modelCache.Set(cacheKey, response)
+
+	// 返回结果
+	c.JSON(http.StatusOK, response)
 }
 
 // handleAvailableModelsByType 根据提供商类型和配置获取可用模型（用于新建分组时的模型选择）
@@ -1147,6 +1185,20 @@ func (s *MultiProviderServer) handleAvailableModelsByType(c *gin.Context) {
 		req.Timeout = 30
 	}
 
+	// 检查是否强制刷新（绕过缓存）
+	forceRefresh := c.Query("refresh") == "true"
+
+	// 生成缓存键
+	cacheKey := cache.GenerateCacheKey(req.ProviderType, req.BaseURL, validKeys[0])
+
+	// 如果不是强制刷新，尝试从缓存获取
+	if !forceRefresh {
+		if cachedData, found := s.modelCache.Get(cacheKey); found {
+			c.JSON(http.StatusOK, cachedData)
+			return
+		}
+	}
+
 	// 创建临时分组配置
 	tempGroup := &internal.UserGroup{
 		Name:         "temp-test-group",
@@ -1182,8 +1234,23 @@ func (s *MultiProviderServer) handleAvailableModelsByType(c *gin.Context) {
 	ctx := c.Request.Context()
 	rawModels, err := provider.GetModels(ctx)
 	if err != nil {
+		errorMsg := "Failed to get models: " + err.Error()
+		suggestedAction := ""
+
+		// 提供具体的建议
+		if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline exceeded") {
+			suggestedAction = "The request timed out. Try increasing the timeout value or check your network connection."
+		} else if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "Unauthorized") {
+			suggestedAction = "Authentication failed. Please verify your API key is correct and has the necessary permissions."
+		} else if strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "rate limit") {
+			suggestedAction = "Rate limit exceeded. Please wait a moment and try again."
+		} else if strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "no such host") {
+			suggestedAction = "Cannot connect to the API endpoint. Please verify the Base URL is correct."
+		}
+
 		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"error": "Failed to get models: " + err.Error(),
+			"error":      errorMsg,
+			"suggestion": suggestedAction,
 		})
 		return
 	}
@@ -1202,6 +1269,9 @@ func (s *MultiProviderServer) handleAvailableModelsByType(c *gin.Context) {
 			},
 		},
 	}
+
+	// 缓存结果
+	s.modelCache.Set(cacheKey, response)
 
 	c.JSON(http.StatusOK, response)
 }

@@ -164,31 +164,36 @@ func (p *OpenAIProvider) ChatCompletionStreamNative(ctx context.Context, req *Ch
 // GetModels 获取可用模型列表
 func (p *OpenAIProvider) GetModels(ctx context.Context) (interface{}, error) {
 	endpoint := fmt.Sprintf("%s/models", p.Config.BaseURL)
-	
+
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	
+
 	httpReq.Header.Set("Authorization", "Bearer "+p.Config.APIKey)
 	httpReq.Header.Set("Content-Type", "application/json")
-	
+
+	// 添加自定义头
+	for key, value := range p.Config.Headers {
+		httpReq.Header.Set(key, value)
+	}
+
 	resp, err := p.HTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, p.handleAPIError(resp.StatusCode, body)
 	}
-	
+
 	var models interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&models); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
-	
+
 	return models, nil
 }
 

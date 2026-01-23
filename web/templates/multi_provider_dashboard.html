@@ -2084,21 +2084,40 @@
                                 <div
                                     class="flex justify-between items-center mb-2"
                                 >
-                                    <h4 class="font-semibold">
-                                        支持的模型（可选）
+                                    <h4 class="font-semibold flex items-center space-x-2">
+                                        <span>支持的模型（可选）</span>
+                                        <span x-show="availableModels.length > 0"
+                                              class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800"
+                                              x-text="availableModels.length + ' 个可用'">
+                                        </span>
                                     </h4>
                                     <div class="flex space-x-2">
                                         <button
                                             type="button"
                                             @click="loadAvailableModels()"
-                                            :disabled="!groupFormData.provider_type || !groupFormData.base_url || groupFormData.api_keys.filter(k => k.trim()).length === 0"
+                                            :disabled="!groupFormData.provider_type || !groupFormData.base_url || groupFormData.api_keys.filter(k => k.trim()).length === 0 || loadingModels"
                                             class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded text-sm disabled:opacity-50"
+                                            title="加载此提供商的可用模型列表。需要有效的API密钥和Base URL。"
                                         >
                                             <span x-show="!loadingModels"
                                                 >加载模型</span
                                             >
                                             <span x-show="loadingModels"
                                                 >加载中...</span
+                                            >
+                                        </button>
+                                        <button
+                                            type="button"
+                                            @click="refreshModels()"
+                                            :disabled="!groupFormData.provider_type || !groupFormData.base_url || groupFormData.api_keys.filter(k => k.trim()).length === 0 || refreshingModels"
+                                            class="bg-indigo-500 hover:bg-indigo-600 text-white px-3 py-1 rounded text-sm disabled:opacity-50"
+                                            title="刷新模型列表（绕过缓存）"
+                                        >
+                                            <span x-show="!refreshingModels"
+                                                >🔄 刷新</span
+                                            >
+                                            <span x-show="refreshingModels"
+                                                >刷新中...</span
                                             >
                                         </button>
                                         <button
@@ -2150,8 +2169,8 @@
                                             <input
                                                 type="text"
                                                 x-model="modelSearchQuery"
-                                                @input="filterModels()"
-                                                placeholder="搜索模型名称..."
+                                                @input.debounce.300ms="filterModels()"
+                                                placeholder="搜索模型名称、描述..."
                                                 class="w-full px-3 py-2 pl-8 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                                             />
                                             <svg
@@ -2189,40 +2208,123 @@
                                         </div>
                                     </div>
 
+                                    <!-- 过滤器芯片 -->
+                                    <div class="flex flex-wrap gap-2 mb-3">
+                                        <button
+                                            type="button"
+                                            @click="filterByCapability('all')"
+                                            :class="modelCapabilityFilter === 'all' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'"
+                                            class="px-2 py-1 rounded text-xs hover:opacity-80 transition"
+                                        >
+                                            全部 (<span x-text="availableModels.length"></span>)
+                                        </button>
+                                        <button
+                                            type="button"
+                                            @click="filterByCapability('vision')"
+                                            :class="modelCapabilityFilter === 'vision' ? 'bg-purple-500 text-white' : 'bg-gray-200 text-gray-700'"
+                                            class="px-2 py-1 rounded text-xs hover:opacity-80 transition"
+                                            title="筛选支持视觉的模型"
+                                        >
+                                            👁️ 视觉
+                                        </button>
+                                        <button
+                                            type="button"
+                                            @click="filterByCapability('function_calling')"
+                                            :class="modelCapabilityFilter === 'function_calling' ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-700'"
+                                            class="px-2 py-1 rounded text-xs hover:opacity-80 transition"
+                                            title="筛选支持函数调用的模型"
+                                        >
+                                            🔧 函数调用
+                                        </button>
+                                    </div>
+
                                     <!-- 模型列表 -->
                                     <div
-                                        class="max-h-40 overflow-y-auto space-y-1"
+                                        class="max-h-60 overflow-y-auto space-y-2"
                                     >
                                         <template
                                             x-for="model in filteredModels"
                                             :key="model.id"
                                         >
                                             <label
-                                                class="flex items-center space-x-2 text-sm hover:bg-white p-1 rounded"
+                                                class="flex items-start space-x-3 text-sm hover:bg-white p-2 rounded cursor-pointer border border-transparent hover:border-blue-200 transition-all"
                                             >
                                                 <input
                                                     type="checkbox"
                                                     :value="model.id"
                                                     x-model="groupFormData.models"
-                                                    class="rounded"
+                                                    class="mt-1 rounded text-blue-600 focus:ring-blue-500"
                                                 />
-                                                <span
-                                                    class="font-mono"
-                                                    x-text="model.id"
-                                                ></span>
-                                                <span
-                                                    x-show="model.owned_by"
-                                                    class="text-gray-500"
-                                                    x-text="'(' + model.owned_by + ')'"
-                                                ></span>
+                                                <div class="flex-1 min-w-0">
+                                                    <div class="flex items-center space-x-2">
+                                                        <span class="font-mono font-semibold text-gray-900" x-text="model.id"></span>
+                                                        <span x-show="model.capabilities && model.capabilities.includes('vision')"
+                                                              class="text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded"
+                                                              title="支持视觉">👁️</span>
+                                                        <span x-show="model.capabilities && model.capabilities.includes('function_calling')"
+                                                              class="text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded"
+                                                              title="支持函数调用">🔧</span>
+                                                    </div>
+                                                    <div class="flex items-center space-x-2 mt-1 text-xs text-gray-500">
+                                                        <span x-show="model.owned_by" x-text="model.owned_by"></span>
+                                                        <span x-show="model.context_window" class="text-gray-400">
+                                                            • <span x-text="formatContextWindow(model.context_window)"></span>
+                                                        </span>
+                                                    </div>
+                                                    <div x-show="model.display_name && model.display_name !== model.id"
+                                                         class="text-xs text-gray-600 mt-0.5"
+                                                         x-text="model.display_name"></div>
+                                                </div>
                                             </label>
                                         </template>
                                         <div
                                             x-show="filteredModels.length === 0 && modelSearchQuery"
-                                            class="text-center py-4 text-gray-500 text-sm"
+                                            class="text-center py-8 text-gray-500 text-sm"
                                         >
-                                            未找到匹配的模型
+                                            <svg class="w-12 h-12 mx-auto mb-2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                            </svg>
+                                            <p>未找到匹配的模型</p>
+                                            <p class="text-xs mt-1">尝试调整搜索关键词</p>
                                         </div>
+                                    </div>
+
+                                    <!-- 加载状态骨架屏 -->
+                                    <div x-show="loadingModels" class="space-y-2 animate-pulse">
+                                        <div class="h-10 bg-gray-200 rounded"></div>
+                                        <div class="h-10 bg-gray-200 rounded"></div>
+                                        <div class="h-10 bg-gray-200 rounded"></div>
+                                        <div class="h-10 bg-gray-200 rounded"></div>
+                                    </div>
+
+                                    <!-- 错误状态 -->
+                                    <div x-show="modelLoadError" class="bg-red-50 border border-red-200 rounded-lg p-4 mt-3">
+                                        <div class="flex items-start space-x-3">
+                                            <svg class="w-5 h-5 text-red-500 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                            </svg>
+                                            <div class="flex-1">
+                                                <h4 class="text-sm font-semibold text-red-800">加载模型失败</h4>
+                                                <p class="text-sm text-red-700 mt-1" x-text="modelLoadError"></p>
+                                                <button
+                                                    type="button"
+                                                    @click="loadAvailableModels(true)"
+                                                    class="mt-2 text-sm text-red-600 hover:text-red-800 underline"
+                                                >
+                                                    重试
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- 空状态 -->
+                                    <div x-show="availableModels.length === 0 && !loadingModels && !modelLoadError"
+                                         class="text-center py-8 text-gray-500">
+                                        <svg class="w-16 h-16 mx-auto mb-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
+                                        </svg>
+                                        <p class="text-sm font-medium">暂无可用模型</p>
+                                        <p class="text-xs mt-1">点击"加载模型"按钮获取模型列表</p>
                                     </div>
                                 </div>
 
@@ -2245,30 +2347,37 @@
                                 <!-- 已选择的模型预览 -->
                                 <div
                                     x-show="groupFormData.models.length > 0"
-                                    class="mt-3"
+                                    class="mt-4 bg-blue-50 rounded-lg p-4 border border-blue-200"
                                 >
-                                    <div class="text-sm text-gray-600 mb-2">
-                                        已选择的模型 (<span
-                                            x-text="groupFormData.models.length"
-                                        ></span
-                                        >)：
+                                    <div class="flex justify-between items-center mb-3">
+                                        <div class="text-sm font-semibold text-blue-900">
+                                            已选择 <span x-text="groupFormData.models.length" class="text-lg"></span> 个模型
+                                        </div>
+                                        <button
+                                            type="button"
+                                            @click="sortSelectedModels()"
+                                            class="text-xs text-blue-600 hover:text-blue-800 underline"
+                                        >
+                                            按名称排序
+                                        </button>
                                     </div>
-                                    <div class="flex flex-wrap gap-1">
+                                    <div class="flex flex-wrap gap-2 max-h-40 overflow-y-auto">
                                         <template
                                             x-for="model in groupFormData.models"
                                             :key="model"
                                         >
                                             <span
-                                                class="inline-flex items-center px-2 py-1 rounded-full text-xs bg-blue-100 text-blue-800"
+                                                class="inline-flex items-center px-3 py-1.5 rounded-full text-sm bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200 transition-colors"
                                             >
-                                                <span x-text="model"></span>
+                                                <span x-text="model" class="font-mono"></span>
                                                 <button
                                                     type="button"
                                                     @click="removeModel(model)"
-                                                    class="ml-1 text-blue-600 hover:text-blue-800"
+                                                    class="ml-2 text-blue-600 hover:text-blue-900 focus:outline-none"
+                                                    title="移除此模型"
                                                 >
                                                     <svg
-                                                        class="w-3 h-3"
+                                                        class="w-4 h-4"
                                                         fill="none"
                                                         stroke="currentColor"
                                                         viewBox="0 0 24 24"
@@ -2697,11 +2806,13 @@
                                             可以为该分组设置默认的请求参数，这些参数会覆盖客户端发送的参数
                                         </li>
                                         <li>
-                                            支持的参数：temperature（温度）、max_tokens（最大token数）、top_p、stop（停止词）
+                                            支持任意JSON参数，包括但不限于：temperature（温度）、max_tokens（最大token数）、top_p、top_k、stop（停止词）、stream（流式输出）、presence_penalty、frequency_penalty 等
                                         </li>
                                         <li>
-                                            示例：{"temperature": 0.7,
-                                            "max_tokens": 1000, "top_p": 0.9}
+                                            示例：{"temperature": 0.7, "max_tokens": 1000, "top_p": 0.9, "stream": true}
+                                        </li>
+                                        <li>
+                                            支持嵌套对象和数组，例如：{"stop": ["Human:", "AI:"], "response_format": {"type": "json_object"}}
                                         </li>
                                         <li>
                                             留空表示不覆盖任何参数，使用客户端发送的原始参数
@@ -2716,10 +2827,10 @@
                                         @input="validateRequestParams()"
                                         class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
                                         rows="6"
-                                        placeholder='{"temperature": 0.7, "max_tokens": 1000, "top_p": 0.9, "stop": ["Human:", "AI:"]}'
+                                        placeholder='{"temperature": 0.7, "max_tokens": 1000, "top_p": 0.9, "stream": true, "stop": ["Human:", "AI:"]}'
                                     ></textarea>
                                     <p class="text-sm text-gray-500 mt-1">
-                                        请输入有效的JSON格式，留空表示不覆盖任何参数
+                                        请输入有效的JSON格式，支持任意参数。留空表示不覆盖任何参数
                                     </p>
                                 </div>
 
@@ -4082,7 +4193,11 @@
                     availableModels: [],
                     filteredModels: [],
                     loadingModels: false,
+                    refreshingModels: false,
                     modelSearchQuery: "",
+                    modelCapabilityFilter: 'all',
+                    modelLoadError: null,
+                    modelCacheTimestamp: null,
 
                     groupFormData: {
                         group_id: "",
@@ -4180,11 +4295,11 @@
                         // 启动系统健康状态的定时刷新（只刷新第一排的系统信息）
                         this.startSystemHealthRefresh();
 
-                        // 添加页面可见性变化监听器，确保用户回到页面时数据是最新的
+                        // 添加页面可见性变化监听器，确保用户回到页面时统计数据是最新的
                         document.addEventListener("visibilitychange", () => {
                             if (!document.hidden) {
-                                // 页面变为可见时，刷新数据
-                                this.loadProviderStatuses();
+                                // 页面变为可见时，只刷新统计数据，不刷新列表
+                                this.loadSystemHealth();
                                 this.refreshProxyKeysOnly();
                             }
                         });
@@ -4662,14 +4777,12 @@
                         if (!this.validatingGroups) {
                             this.validatingGroups = {};
                         }
-                        this.validatingGroups[groupId] = true;
 
-                        // 强制更新UI
-                        this.$nextTick(() => {
-                            this.validatingGroups = {
-                                ...this.validatingGroups,
-                            };
-                        });
+                        // 设置验证状态为 true - 使用对象展开确保响应式更新
+                        this.validatingGroups = {
+                            ...this.validatingGroups,
+                            [groupId]: true
+                        };
 
                         try {
                             // 获取分组的完整数据
@@ -4758,16 +4871,11 @@
                             console.error("验证分组密钥失败:", error);
                             alert(`验证分组密钥失败：${error.message}`);
                         } finally {
-                            // 清除验证状态
-                            if (this.validatingGroups) {
-                                this.validatingGroups[groupId] = false;
-                                // 强制更新UI
-                                this.$nextTick(() => {
-                                    this.validatingGroups = {
-                                        ...this.validatingGroups,
-                                    };
-                                });
-                            }
+                            // 清除验证状态 - 使用对象展开确保响应式更新
+                            this.validatingGroups = {
+                                ...this.validatingGroups,
+                                [groupId]: false
+                            };
                         }
                     },
 
@@ -5911,7 +6019,8 @@
                                     },
                                     body: JSON.stringify({
                                         api_key: apiKey.trim(),
-                                        status: status,
+                                        is_valid: status === 'valid',
+                                        force_set: true,
                                     }),
                                 }
                             );
@@ -6143,14 +6252,18 @@
                     },
 
                     // 加载可用模型
-                    async loadAvailableModels() {
+                    async loadAvailableModels(forceRefresh = false) {
+                        this.modelLoadError = null;
+
                         // 如果是编辑模式，可以直接从现有分组加载模型
                         if (this.showEditGroupModal && this.editingGroupId) {
                             this.loadingModels = true;
                             try {
-                                const response = await fetch(
-                                    `/admin/models/available/${this.editingGroupId}`,
-                                );
+                                const url = forceRefresh
+                                    ? `/admin/models/available/${this.editingGroupId}?refresh=true`
+                                    : `/admin/models/available/${this.editingGroupId}`;
+
+                                const response = await fetch(url);
 
                                 if (response.ok) {
                                     const data = await response.json();
@@ -6164,14 +6277,16 @@
                                     ) {
                                         this.availableModels =
                                             groupData.models.data;
+                                        this.modelCacheTimestamp = new Date();
                                         this.filterModels();
                                         this.showMessage(
-                                            `成功加载 ${this.availableModels.length} 个模型`,
+                                            `成功加载 ${this.availableModels.length} 个模型${forceRefresh ? '（已刷新缓存）' : ''}`,
                                             "success",
                                         );
                                     } else {
                                         this.availableModels = [];
                                         this.filterModels();
+                                        this.modelLoadError = "未找到可用模型";
                                         this.showMessage(
                                             "未找到可用模型",
                                             "error",
@@ -6179,14 +6294,14 @@
                                     }
                                 } else {
                                     const errorData = await response.json();
+                                    this.modelLoadError = errorData.error?.message || "加载失败";
                                     this.showMessage(
-                                        "加载模型失败: " +
-                                            (errorData.error?.message ||
-                                                "未知错误"),
+                                        "加载模型失败: " + this.modelLoadError,
                                         "error",
                                     );
                                 }
                             } catch (error) {
+                                this.modelLoadError = error.message;
                                 this.showMessage(
                                     "网络错误: " + error.message,
                                     "error",
@@ -6269,25 +6384,28 @@
                                 ) {
                                     this.availableModels =
                                         groupData.models.data;
+                                    this.modelCacheTimestamp = new Date();
                                     this.filterModels();
                                     this.showMessage(
-                                        `成功加载 ${this.availableModels.length} 个模型`,
+                                        `成功加载 ${this.availableModels.length} 个模型${forceRefresh ? '（已刷新缓存）' : ''}`,
                                         "success",
                                     );
                                 } else {
                                     this.availableModels = [];
                                     this.filterModels();
+                                    this.modelLoadError = "未找到可用模型";
                                     this.showMessage("未找到可用模型", "error");
                                 }
                             } else {
                                 const errorData = await response.json();
+                                this.modelLoadError = errorData.error || errorData.suggestion || "加载失败";
                                 this.showMessage(
-                                    "加载模型失败: " +
-                                        (errorData.error || "未知错误"),
+                                    "加载模型失败: " + (errorData.error || "未知错误"),
                                     "error",
                                 );
                             }
                         } catch (error) {
+                            this.modelLoadError = error.message;
                             this.showMessage(
                                 "网络错误: " + error.message,
                                 "error",
@@ -6299,19 +6417,60 @@
 
                     // 筛选模型
                     filterModels() {
-                        if (!this.modelSearchQuery.trim()) {
-                            this.filteredModels = this.availableModels;
-                        } else {
-                            const query = this.modelSearchQuery.toLowerCase();
-                            this.filteredModels = this.availableModels.filter(
-                                (model) =>
-                                    model.id.toLowerCase().includes(query) ||
-                                    (model.owned_by &&
-                                        model.owned_by
-                                            .toLowerCase()
-                                            .includes(query)),
+                        let filtered = this.availableModels;
+
+                        // Apply capability filter
+                        if (this.modelCapabilityFilter !== 'all') {
+                            filtered = filtered.filter(model =>
+                                model.capabilities &&
+                                model.capabilities.includes(this.modelCapabilityFilter)
                             );
                         }
+
+                        // Apply search query
+                        if (this.modelSearchQuery.trim()) {
+                            const query = this.modelSearchQuery.toLowerCase();
+                            filtered = filtered.filter(model =>
+                                model.id.toLowerCase().includes(query) ||
+                                (model.display_name && model.display_name.toLowerCase().includes(query)) ||
+                                (model.owned_by && model.owned_by.toLowerCase().includes(query)) ||
+                                (model.description && model.description.toLowerCase().includes(query))
+                            );
+                        }
+
+                        this.filteredModels = filtered;
+                    },
+
+                    // Refresh models (bypass cache)
+                    async refreshModels() {
+                        this.refreshingModels = true;
+                        try {
+                            await this.loadAvailableModels(true);
+                        } finally {
+                            this.refreshingModels = false;
+                        }
+                    },
+
+                    // Filter by capability
+                    filterByCapability(capability) {
+                        this.modelCapabilityFilter = capability;
+                        this.filterModels();
+                    },
+
+                    // Format context window
+                    formatContextWindow(tokens) {
+                        if (!tokens) return '';
+                        if (tokens >= 1000000) {
+                            return `${(tokens / 1000000).toFixed(1)}M tokens`;
+                        } else if (tokens >= 1000) {
+                            return `${(tokens / 1000).toFixed(0)}K tokens`;
+                        }
+                        return `${tokens} tokens`;
+                    },
+
+                    // Sort selected models
+                    sortSelectedModels() {
+                        this.groupFormData.models = [...this.groupFormData.models].sort();
                     },
 
                     // 清除模型搜索
@@ -6365,71 +6524,44 @@
                                 return;
                             }
 
-                            // 检查支持的参数
-                            const supportedParams = [
-                                "temperature",
-                                "max_tokens",
-                                "top_p",
-                                "stop",
-                            ];
-                            const unsupportedParams = Object.keys(
-                                parsed,
-                            ).filter((key) => !supportedParams.includes(key));
-
-                            if (unsupportedParams.length > 0) {
-                                this.requestParamsValidationMessage = `不支持的参数: ${unsupportedParams.join(", ")}。支持的参数: ${supportedParams.join(", ")}`;
-                                this.requestParamsValidationError = true;
-                                return;
-                            }
-
-                            // 验证参数值类型
-                            if (
-                                "temperature" in parsed &&
-                                (typeof parsed.temperature !== "number" ||
-                                    parsed.temperature < 0 ||
-                                    parsed.temperature > 2)
-                            ) {
+                            // 检查是否为空对象
+                            if (Object.keys(parsed).length === 0) {
                                 this.requestParamsValidationMessage =
-                                    "temperature必须是0-2之间的数字";
+                                    "JSON对象不能为空";
                                 this.requestParamsValidationError = true;
                                 return;
                             }
 
-                            if (
-                                "max_tokens" in parsed &&
-                                (!Number.isInteger(parsed.max_tokens) ||
-                                    parsed.max_tokens <= 0)
-                            ) {
-                                this.requestParamsValidationMessage =
-                                    "max_tokens必须是正整数";
-                                this.requestParamsValidationError = true;
-                                return;
+                            // 提供一些常见参数的友好提示（可选验证）
+                            const warnings = [];
+
+                            if ("temperature" in parsed && typeof parsed.temperature === "number") {
+                                if (parsed.temperature < 0 || parsed.temperature > 2) {
+                                    warnings.push("temperature通常在0-2之间");
+                                }
                             }
 
-                            if (
-                                "top_p" in parsed &&
-                                (typeof parsed.top_p !== "number" ||
-                                    parsed.top_p < 0 ||
-                                    parsed.top_p > 1)
-                            ) {
-                                this.requestParamsValidationMessage =
-                                    "top_p必须是0-1之间的数字";
-                                this.requestParamsValidationError = true;
-                                return;
+                            if ("top_p" in parsed && typeof parsed.top_p === "number") {
+                                if (parsed.top_p < 0 || parsed.top_p > 1) {
+                                    warnings.push("top_p通常在0-1之间");
+                                }
                             }
 
-                            if (
-                                "stop" in parsed &&
-                                !Array.isArray(parsed.stop)
-                            ) {
-                                this.requestParamsValidationMessage =
-                                    "stop必须是字符串数组";
-                                this.requestParamsValidationError = true;
-                                return;
+                            if ("max_tokens" in parsed && typeof parsed.max_tokens === "number") {
+                                if (parsed.max_tokens <= 0) {
+                                    warnings.push("max_tokens应该是正数");
+                                }
                             }
 
-                            this.requestParamsValidationMessage =
-                                "JSON格式正确";
+                            // 显示成功消息和可选警告
+                            const paramCount = Object.keys(parsed).length;
+                            let message = `✓ JSON格式正确，包含 ${paramCount} 个参数`;
+
+                            if (warnings.length > 0) {
+                                message += ` (提示: ${warnings.join(", ")})`;
+                            }
+
+                            this.requestParamsValidationMessage = message;
                             this.requestParamsValidationError = false;
                         } catch (e) {
                             this.requestParamsValidationMessage =
