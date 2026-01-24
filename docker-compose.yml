@@ -9,23 +9,30 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+
     volumes:
-      # 挂载配置文件
-      - ./config/config.yaml:/app/config/config.yaml
+      # 挂载整个 config 目录（推荐）
+      - ./config:/app/config
+
       # 挂载日志目录
       - ./logs:/app/logs
+
       # 挂载数据库目录
       - ./data:/app/data
-      # 可选：挂载静态文件目录（如果需要自定义）
+
+      # 静态文件只读挂载
       - ./web:/app/web:ro
+
     environment:
       - TZ=Asia/Shanghai
+
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+
     networks:
       - turnsapi-network
 
