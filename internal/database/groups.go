@@ -329,7 +329,13 @@ func (gdb *GroupsDB) migrateNewFields() error {
 }
 
 // UpdateAPIKeyValidation 更新API密钥的验证状态
-func (gdb *GroupsDB) UpdateAPIKeyValidation(groupID, apiKey string, isValid bool, validationError string) error {
+// isValid 为 nil 时表示“未知/不变”，不会覆盖数据库中已有的 is_valid 值，但会更新 last_validated_at 与 validation_error。
+func (gdb *GroupsDB) UpdateAPIKeyValidation(groupID, apiKey string, isValid *bool, validationError string) error {
+	var isValidValue interface{} = nil
+	if isValid != nil {
+		isValidValue = *isValid
+	}
+
 	// 先检查记录是否存在，如果不存在则插入
 	checkSQL := `SELECT COUNT(*) FROM provider_api_keys WHERE group_id = ? AND api_key = ?`
 	var count int
@@ -343,7 +349,7 @@ func (gdb *GroupsDB) UpdateAPIKeyValidation(groupID, apiKey string, isValid bool
 		insertSQL := `
 			INSERT INTO provider_api_keys (group_id, api_key, is_valid, last_validated_at, validation_error, key_order)
 			VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, 0)`
-		_, err = gdb.db.Exec(insertSQL, groupID, apiKey, isValid, validationError)
+		_, err = gdb.db.Exec(insertSQL, groupID, apiKey, isValidValue, validationError)
 		if err != nil {
 			return fmt.Errorf("failed to insert API key validation status: %w", err)
 		}
@@ -351,9 +357,9 @@ func (gdb *GroupsDB) UpdateAPIKeyValidation(groupID, apiKey string, isValid bool
 		// 更新现有记录
 		updateSQL := `
 			UPDATE provider_api_keys
-			SET is_valid = ?, last_validated_at = CURRENT_TIMESTAMP, validation_error = ?
+			SET is_valid = COALESCE(?, is_valid), last_validated_at = CURRENT_TIMESTAMP, validation_error = ?
 			WHERE group_id = ? AND api_key = ?`
-		_, err = gdb.db.Exec(updateSQL, isValid, validationError, groupID, apiKey)
+		_, err = gdb.db.Exec(updateSQL, isValidValue, validationError, groupID, apiKey)
 		if err != nil {
 			return fmt.Errorf("failed to update API key validation status: %w", err)
 		}

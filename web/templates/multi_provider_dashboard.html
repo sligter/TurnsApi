@@ -1944,6 +1944,24 @@
                                                                 ></path>
                                                             </svg>
                                                         </div>
+                                                        <!-- 未知状态（例如限速/临时错误） -->
+                                                        <div
+                                                            x-show="keyValidationStatus[index + keyPageOffset] === 'unknown'"
+                                                            class="flex items-center"
+                                                            title="状态未知（可能限速/临时错误）"
+                                                        >
+                                                            <svg
+                                                                class="w-4 h-4 text-gray-500"
+                                                                fill="currentColor"
+                                                                viewBox="0 0 20 20"
+                                                            >
+                                                                <path
+                                                                    fill-rule="evenodd"
+                                                                    d="M18 10A8 8 0 11 2 10a8 8 0 0116 0zm-8-4a3 3 0 00-3 3 1 1 0 102 0 1 1 0 112 0c0 .513-.386.935-1.173 1.533C8.694 10.8 8 11.576 8 13a1 1 0 102 0c0-.68.22-.93 1.173-1.534C12.306 10.2 13 9.424 13 8a3 3 0 00-3-3zm0 10a1 1 0 100-2 1 1 0 000 2z"
+                                                                    clip-rule="evenodd"
+                                                                ></path>
+                                                            </svg>
+                                                        </div>
                                                         <!-- 验证中状态 -->
                                                         <div
                                                             x-show="keyValidationStatus[index + keyPageOffset] === 'validating'"
@@ -4838,6 +4856,7 @@
                             if (result.success) {
                                 const validCount = result.valid_keys || 0;
                                 const invalidCount = result.invalid_keys || 0;
+                                const unknownCount = result.unknown_keys || 0;
                                 const totalCount = result.total_keys || 0;
 
                                 // 更新本地密钥状态数据
@@ -4847,15 +4866,21 @@
                                 this.keyStatus.groups[groupId] = {
                                     valid_keys: validCount,
                                     invalid_keys: invalidCount,
+                                    unknown_keys: unknownCount,
                                     total_keys: totalCount,
                                     last_validated: new Date().toISOString(),
                                 };
 
                                 // 显示结果
+                                const unknownLine =
+                                    unknownCount > 0
+                                        ? `❓ 未知（可能限速/临时错误）：${unknownCount}\n`
+                                        : "";
                                 const message =
                                     `分组 "${provider.group_name}" 密钥验证完成：\n\n` +
                                     `✅ 有效密钥：${validCount}\n` +
                                     `❌ 无效密钥：${invalidCount}\n` +
+                                    unknownLine +
                                     `📊 总计：${totalCount}\n\n` +
                                     `验证结果已保存到密钥管理列表中`;
 
@@ -5850,11 +5875,12 @@
                                 },
                             );
 
-                            if (response.ok) {
-                                const data = await response.json();
-                                if (data.success && data.results) {
-                                    let validCount = 0;
-                                    let invalidCount = 0;
+                                if (response.ok) {
+                                    const data = await response.json();
+                                    if (data.success && data.results) {
+                                        let validCount = 0;
+                                        let invalidCount = 0;
+                                        let unknownCount = 0;
 
                                     // 更新验证状态
                                     data.results.forEach(
@@ -5885,12 +5911,18 @@
                                                 }
                                             }
 
-                                            if (result.valid) {
+                                            const status =
+                                                result.status ||
+                                                (result.valid
+                                                    ? "valid"
+                                                    : "invalid");
+
+                                            if (status === "valid") {
                                                 this.keyValidationStatus[
                                                     originalIndex
                                                 ] = "valid";
                                                 validCount++;
-                                            } else {
+                                            } else if (status === "invalid") {
                                                 this.keyValidationStatus[
                                                     originalIndex
                                                 ] = "invalid";
@@ -5898,12 +5930,17 @@
                                                     originalIndex,
                                                 );
                                                 invalidCount++;
+                                            } else {
+                                                this.keyValidationStatus[
+                                                    originalIndex
+                                                ] = "unknown";
+                                                unknownCount++;
                                             }
                                         },
                                     );
 
                                     this.showMessage(
-                                        `验证完成：${validCount} 个有效，${invalidCount} 个无效`,
+                                        `验证完成：${validCount} 个有效，${invalidCount} 个无效，${unknownCount} 个未知（可能限速/临时错误）`,
                                         validCount > 0 ? "success" : "error",
                                     );
                                 } else {
@@ -6233,6 +6270,8 @@
                             return "bg-red-50 border-red-200";
                         } else if (status === "validating") {
                             return "bg-yellow-50 border-yellow-200";
+                        } else if (status === "unknown") {
+                            return "bg-gray-50 border-gray-200";
                         }
                         return "";
                     },
@@ -6759,12 +6798,16 @@
                             const valid = keyStatusData.valid_keys || 0;
                             const invalid = keyStatusData.invalid_keys || 0;
                             const total = keyStatusData.total_keys || 0;
+                            const unknown =
+                                keyStatusData.unknown_keys != null
+                                    ? keyStatusData.unknown_keys || 0
+                                    : Math.max(total - valid - invalid, 0);
 
                             return {
                                 total: total,
                                 valid: valid,
                                 invalid: invalid,
-                                unknown: 0, // 已检测完毕，没有未知状态
+                                unknown: unknown,
                             };
                         } else {
                             // 如果没有检测数据，使用提供商基本信息

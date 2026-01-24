@@ -114,38 +114,27 @@ func (gkm *GroupKeyManager) getActiveKeys() []string {
 
 // roundRobinSelection 轮询选择
 func (gkm *GroupKeyManager) roundRobinSelection(activeKeys []string) string {
-	if len(activeKeys) == 0 {
+	// activeKeys 会动态变化（禁用/失效/恢复），这里以 gkm.keys 为基准做环形扫描，
+	// 从 currentIndex 开始找下一个 IsActive 的 key，确保真正轮询且能跳过不可用 key。
+	if len(activeKeys) == 0 || len(gkm.keys) == 0 {
 		return ""
 	}
 
-	// 找到当前索引对应的密钥在活跃密钥中的位置
-	currentKey := ""
-	if gkm.currentIndex < len(gkm.keys) {
-		currentKey = gkm.keys[gkm.currentIndex]
+	startIndex := gkm.currentIndex
+	if startIndex < 0 || startIndex >= len(gkm.keys) {
+		startIndex = 0
 	}
 
-	// 查找当前密钥在活跃密钥中的位置
-	currentPos := -1
-	for i, key := range activeKeys {
-		if key == currentKey {
-			currentPos = i
-			break
+	for offset := 0; offset < len(gkm.keys); offset++ {
+		idx := (startIndex + offset) % len(gkm.keys)
+		key := gkm.keys[idx]
+		if status, exists := gkm.keyStatuses[key]; exists && status.IsActive {
+			gkm.currentIndex = (idx + 1) % len(gkm.keys)
+			return key
 		}
 	}
 
-	// 选择下一个密钥
-	nextPos := (currentPos + 1) % len(activeKeys)
-	selectedKey := activeKeys[nextPos]
-
-	// 更新全局索引
-	for i, key := range gkm.keys {
-		if key == selectedKey {
-			gkm.currentIndex = (i + 1) % len(gkm.keys)
-			break
-		}
-	}
-
-	return selectedKey
+	return ""
 }
 
 // randomSelection 随机选择
@@ -301,12 +290,12 @@ func NewMultiGroupKeyManagerWithDB(config *internal.Config, db *database.GroupsD
 	for groupID, group := range config.UserGroups {
 		if group.Enabled && len(group.APIKeys) > 0 {
 			groupManager := NewGroupKeyManager(groupID, group.Name, group.APIKeys, group.RotationStrategy)
-			
+
 			// 如果有数据库连接，从数据库加载密钥验证状态
 			if db != nil {
 				mgkm.loadKeyValidationStatusFromDB(groupID, groupManager)
 			}
-			
+
 			mgkm.groupManagers[groupID] = groupManager
 		}
 	}
@@ -453,17 +442,17 @@ func (mgkm *MultiGroupKeyManager) ForceSetKeyStatus(groupID, apiKey string, isVa
 		status.IsValid = &isValid
 		status.ValidationError = reason
 		status.UpdatedAt = time.Now()
-		
+
 		// 如果设置为有效，清除错误信息并激活密钥
 		if isValid {
 			status.IsActive = true
 			status.ErrorCount = 0
 			status.LastError = ""
 		}
-		
+
 		log.Printf("强制设置密钥状态: 分组=%s, 密钥=%s, 有效=%v, 原因=%s",
 			groupID, groupManager.maskKey(apiKey), isValid, reason)
-		
+
 		return nil
 	}
 
@@ -554,12 +543,12 @@ func (mgkm *MultiGroupKeyManager) GetKeyValidationSummary(groupID string) (map[s
 	}
 
 	return map[string]interface{}{
-		"group_id":      groupID,
-		"group_name":    groupManager.groupName,
-		"total_keys":    totalCount,
-		"valid_keys":    validCount,
-		"invalid_keys":  invalidCount,
-		"unknown_keys":  unknownCount,
+		"group_id":     groupID,
+		"group_name":   groupManager.groupName,
+		"total_keys":   totalCount,
+		"valid_keys":   validCount,
+		"invalid_keys": invalidCount,
+		"unknown_keys": unknownCount,
 	}, nil
 }
 
@@ -607,7 +596,7 @@ func (mgkm *MultiGroupKeyManager) CheckKeyDuplication(newKeys []string) map[stri
 		}
 
 		var foundInGroups []string
-		
+
 		// 检查所有分组中的密钥
 		for groupID, groupManager := range mgkm.groupManagers {
 			for _, existingKey := range groupManager.keys {
@@ -663,11 +652,11 @@ func (mgkm *MultiGroupKeyManager) GetAllKeysAcrossGroups() map[string][]string {
 func (mgkm *MultiGroupKeyManager) ValidateKeysForGroup(groupID string, newKeys []string) (validKeys []string, groupDuplicates []DuplicateKeyInfo, internalDuplicates []DuplicateKeyInfo) {
 	mgkm.mutex.RLock()
 	defer mgkm.mutex.RUnlock()
-	
+
 	validKeys = make([]string, 0)
 	groupDuplicates = make([]DuplicateKeyInfo, 0)
 	internalDuplicates = make([]DuplicateKeyInfo, 0)
-	
+
 	// 获取目标分组现有密钥
 	var existingKeys map[string]bool
 	if groupManager, exists := mgkm.groupManagers[groupID]; exists {
@@ -678,16 +667,16 @@ func (mgkm *MultiGroupKeyManager) ValidateKeysForGroup(groupID string, newKeys [
 	} else {
 		existingKeys = make(map[string]bool)
 	}
-	
+
 	// 用于跟踪输入列表中的重复
 	seenInInput := make(map[string]int) // key -> first occurrence index
-	
+
 	for i, key := range newKeys {
 		key = strings.TrimSpace(key)
 		if key == "" {
 			continue
 		}
-		
+
 		// 检查输入列表内部重复
 		if firstIndex, exists := seenInInput[key]; exists {
 			internalDuplicates = append(internalDuplicates, DuplicateKeyInfo{
@@ -699,7 +688,7 @@ func (mgkm *MultiGroupKeyManager) ValidateKeysForGroup(groupID string, newKeys [
 			continue
 		}
 		seenInInput[key] = i
-		
+
 		// 检查与分组内现有密钥的重复
 		if existingKeys[key] {
 			groupDuplicates = append(groupDuplicates, DuplicateKeyInfo{
@@ -710,11 +699,11 @@ func (mgkm *MultiGroupKeyManager) ValidateKeysForGroup(groupID string, newKeys [
 			})
 			continue
 		}
-		
+
 		// 密钥有效，添加到结果中
 		validKeys = append(validKeys, key)
 	}
-	
+
 	return validKeys, groupDuplicates, internalDuplicates
 }
 
@@ -744,19 +733,19 @@ func (mgkm *MultiGroupKeyManager) loadKeyValidationStatusFromDB(groupID string, 
 					invalidCount++
 				}
 			}
-			
+
 			// 更新验证错误信息
 			if validationError, ok := status["validation_error"].(*string); ok && validationError != nil {
 				keyStatus.ValidationError = *validationError
 			}
-			
+
 			// 更新最后验证时间
 			if lastValidatedAt, ok := status["last_validated_at"].(*string); ok && lastValidatedAt != nil {
 				if parsedTime, err := time.Parse("2006-01-02 15:04:05", *lastValidatedAt); err == nil {
 					keyStatus.LastValidated = &parsedTime
 				}
 			}
-			
+
 			keyStatus.UpdatedAt = time.Now()
 		}
 	}

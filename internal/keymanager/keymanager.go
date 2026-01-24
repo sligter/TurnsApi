@@ -160,38 +160,27 @@ func (km *KeyManager) getActiveKeys() []string {
 
 // roundRobinSelection 轮询选择
 func (km *KeyManager) roundRobinSelection(activeKeys []string) string {
-	if len(activeKeys) == 0 {
+	// activeKeys 会动态变化（禁用/失效/恢复），这里以 km.keys 为基准做环形扫描，
+	// 从 currentIndex 开始找下一个 IsActive 的 key，确保真正轮询且能跳过不可用 key。
+	if len(activeKeys) == 0 || len(km.keys) == 0 {
 		return ""
 	}
 
-	// 找到当前索引对应的密钥在活跃密钥中的位置
-	currentKey := ""
-	if km.currentIndex < len(km.keys) {
-		currentKey = km.keys[km.currentIndex]
+	startIndex := km.currentIndex
+	if startIndex < 0 || startIndex >= len(km.keys) {
+		startIndex = 0
 	}
 
-	// 查找当前密钥在活跃密钥中的位置
-	currentPos := -1
-	for i, key := range activeKeys {
-		if key == currentKey {
-			currentPos = i
-			break
+	for offset := 0; offset < len(km.keys); offset++ {
+		idx := (startIndex + offset) % len(km.keys)
+		key := km.keys[idx]
+		if status, exists := km.keyStatuses[key]; exists && status.IsActive {
+			km.currentIndex = (idx + 1) % len(km.keys)
+			return key
 		}
 	}
 
-	// 选择下一个密钥
-	nextPos := (currentPos + 1) % len(activeKeys)
-	selectedKey := activeKeys[nextPos]
-
-	// 更新全局索引
-	for i, key := range km.keys {
-		if key == selectedKey {
-			km.currentIndex = (i + 1) % len(km.keys)
-			break
-		}
-	}
-
-	return selectedKey
+	return ""
 }
 
 // randomSelection 随机选择
@@ -257,7 +246,12 @@ func (km *KeyManager) ReportError(apiKey string, errorMsg string) {
 
 		// 实时更新数据库状态
 		if km.database != nil {
-			if err := km.database.UpdateAPIKeyValidation("default", apiKey, !isKeyInvalid, errorMsg); err != nil {
+			var isValidPtr *bool
+			if isKeyInvalid {
+				isValid := false
+				isValidPtr = &isValid
+			}
+			if err := km.database.UpdateAPIKeyValidation("default", apiKey, isValidPtr, errorMsg); err != nil {
 				log.Printf("Failed to update API key validation in database: %v", err)
 			}
 		}
@@ -294,7 +288,8 @@ func (km *KeyManager) ReportSuccess(key string) {
 		// 实时更新数据库状态
 		if km.database != nil {
 			go func() {
-				if err := km.database.UpdateAPIKeyValidation("default", key, true, ""); err != nil {
+				isValid := true
+				if err := km.database.UpdateAPIKeyValidation("default", key, &isValid, ""); err != nil {
 					log.Printf("Failed to update API key validation in database: %v", err)
 				}
 			}()
@@ -395,7 +390,7 @@ func (km *KeyManager) AddKeysInBatch(keys []string) (int, []string, error) {
 	}
 
 	// 检查输入列表内部的重复
-	keySet := make(map[string]int) // 记录每个密钥第一次出现的位置
+	keySet := make(map[string]int)               // 记录每个密钥第一次出现的位置
 	internalDuplicates := make(map[string][]int) // 记录内部重复的位置
 
 	for i, key := range keys {
@@ -810,12 +805,12 @@ func (km *KeyManager) updateConfigFile() error {
 // checkKeyDuplication 检查密钥是否重复（内部方法，调用时需要已获得锁）
 func (km *KeyManager) checkKeyDuplication(newKeys []string) []string {
 	var duplicates []string
-	
+
 	for _, newKey := range newKeys {
 		if strings.TrimSpace(newKey) == "" {
 			continue
 		}
-		
+
 		for _, existingKey := range km.keys {
 			if existingKey == newKey {
 				duplicates = append(duplicates, newKey)
@@ -823,7 +818,7 @@ func (km *KeyManager) checkKeyDuplication(newKeys []string) []string {
 			}
 		}
 	}
-	
+
 	return duplicates
 }
 
@@ -831,7 +826,6 @@ func (km *KeyManager) checkKeyDuplication(newKeys []string) []string {
 func (km *KeyManager) CheckKeyDuplication(newKeys []string) []string {
 	km.mutex.RLock()
 	defer km.mutex.RUnlock()
-	
+
 	return km.checkKeyDuplication(newKeys)
 }
-

@@ -361,8 +361,8 @@ func (cm *ConfigManager) GetDatabaseStats() (map[string]interface{}, error) {
 	}
 
 	stats := map[string]interface{}{
-		"total_groups":   totalGroups,
-		"enabled_groups": enabledGroups,
+		"total_groups":    totalGroups,
+		"enabled_groups":  enabledGroups,
 		"disabled_groups": totalGroups - enabledGroups,
 	}
 
@@ -370,7 +370,8 @@ func (cm *ConfigManager) GetDatabaseStats() (map[string]interface{}, error) {
 }
 
 // UpdateAPIKeyValidation 更新API密钥的验证状态
-func (cm *ConfigManager) UpdateAPIKeyValidation(groupID, apiKey string, isValid bool, validationError string) error {
+// isValid 为 nil 时表示“未知/不变”，不会覆盖数据库中已有的 is_valid 值。
+func (cm *ConfigManager) UpdateAPIKeyValidation(groupID, apiKey string, isValid *bool, validationError string) error {
 	return cm.groupsDB.UpdateAPIKeyValidation(groupID, apiKey, isValid, validationError)
 }
 

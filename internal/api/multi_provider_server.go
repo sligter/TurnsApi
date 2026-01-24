@@ -247,7 +247,7 @@ func (s *MultiProviderServer) setupRoutes() {
 		admin.POST("/groups/:groupId/toggle", s.handleToggleGroup)
 		admin.POST("/groups/export", s.handleExportGroups)
 		admin.POST("/groups/import", s.handleImportGroups)
-		
+
 		// 密钥管理新功能
 		admin.POST("/groups/:groupId/keys/force-status", s.handleForceKeyStatus)
 		admin.DELETE("/groups/:groupId/keys/invalid", s.handleDeleteInvalidKeys)
@@ -407,7 +407,6 @@ func (s *MultiProviderServer) handleOpenAIModels(c *gin.Context, proxyKey *logge
 		"data":   allModels,
 	})
 }
-
 
 // getModelsForGroup 获取指定分组的模型列表
 func (s *MultiProviderServer) getModelsForGroup(groupID string, group *internal.UserGroup) []map[string]interface{} {
@@ -1336,16 +1335,22 @@ func (s *MultiProviderServer) handleValidateKeys(c *gin.Context) {
 	// 统计结果
 	validCount := 0
 	invalidCount := 0
+	unknownCount := 0
 	for _, result := range results {
-		if result["valid"].(bool) {
+		status, _ := result["status"].(string)
+		switch status {
+		case string(KeyValidationValid):
 			validCount++
-		} else {
+		case string(KeyValidationInvalid):
 			invalidCount++
+		default:
+			unknownCount++
 		}
 	}
 
-	log.Printf("📊 验证结果统计: 总计=%d, 有效=%d, 无效=%d, 成功率=%.1f%%",
+	log.Printf("📊 验证结果统计: 总计=%d, 有效=%d, 无效=%d, 未知=%d, 成功率=%.1f%%",
 		len(req.APIKeys), validCount, invalidCount,
+		unknownCount,
 		float64(validCount)/float64(len(req.APIKeys))*100)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1354,6 +1359,7 @@ func (s *MultiProviderServer) handleValidateKeys(c *gin.Context) {
 		"total_keys":   len(req.APIKeys),
 		"valid_keys":   validCount,
 		"invalid_keys": invalidCount,
+		"unknown_keys": unknownCount,
 		"results":      results,
 	})
 }
@@ -1477,6 +1483,7 @@ func (s *MultiProviderServer) validateBatchConcurrently(groupID string, batch []
 				results[actualIndex] = map[string]interface{}{
 					"index":   actualIndex,
 					"api_key": key,
+					"status":  string(KeyValidationInvalid),
 					"valid":   false,
 					"error":   "Empty API key",
 				}
@@ -1488,34 +1495,43 @@ func (s *MultiProviderServer) validateBatchConcurrently(groupID string, batch []
 			// 验证密钥，最多重试3次
 			valid, err := s.validateKeyWithRetry(groupID, key, testModel, group, 3)
 
-			// 更新数据库中的验证状态
 			validationError := ""
 			if err != nil {
 				validationError = err.Error()
 			}
 
-			// 记录验证结果
+			status := KeyValidationUnknown
+			var persistIsValid *bool
 			if valid {
+				status = KeyValidationValid
+				isValid := true
+				persistIsValid = &isValid
 				log.Printf("✅ 密钥验证成功 %d/%d: %s", actualIndex+1, len(results), s.maskKey(key))
 			} else {
-				log.Printf("❌ 密钥验证失败 %d/%d: %s - %s", actualIndex+1, len(results), s.maskKey(key), validationError)
+				status, persistIsValid = classifyKeyValidation(err)
+				log.Printf("❌ 密钥验证失败 %d/%d: %s (status=%s) - %s", actualIndex+1, len(results), s.maskKey(key), status, validationError)
 			}
 
 			// 异步更新数据库，避免阻塞验证流程
 			if groupID != "temp" { // 只有非临时分组才更新数据库
-				go func(gID, apiKey string, isValid bool, errMsg string) {
+				go func(gID, apiKey string, isValid *bool, errMsg string) {
 					if updateErr := s.configManager.UpdateAPIKeyValidation(gID, apiKey, isValid, errMsg); updateErr != nil {
 						log.Printf("❌ 更新数据库验证状态失败 %s: %v", s.maskKey(apiKey), updateErr)
 					} else {
-						log.Printf("💾 数据库验证状态已更新: %s (有效: %v)", s.maskKey(apiKey), isValid)
+						isValidStr := "unknown"
+						if isValid != nil {
+							isValidStr = fmt.Sprintf("%v", *isValid)
+						}
+						log.Printf("💾 数据库验证状态已更新: %s (is_valid=%s)", s.maskKey(apiKey), isValidStr)
 					}
-				}(groupID, key, valid, validationError)
+				}(groupID, key, persistIsValid, validationError)
 			}
 
 			results[actualIndex] = map[string]interface{}{
 				"index":   actualIndex,
 				"api_key": key,
-				"valid":   valid,
+				"status":  string(status),
+				"valid":   status == KeyValidationValid,
 				"error":   validationError,
 			}
 		}(i, apiKey)
@@ -2892,7 +2908,7 @@ func (s *MultiProviderServer) handleImportGroups(c *gin.Context) {
 
 	// 检查文件类型
 	if !strings.HasSuffix(strings.ToLower(header.Filename), ".yaml") &&
-	   !strings.HasSuffix(strings.ToLower(header.Filename), ".yml") {
+		!strings.HasSuffix(strings.ToLower(header.Filename), ".yml") {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
 			"error":   "Only YAML files are supported",
@@ -3121,16 +3137,22 @@ func (s *MultiProviderServer) handleValidateKeysWithoutGroup(c *gin.Context) {
 	// 统计结果
 	validCount := 0
 	invalidCount := 0
+	unknownCount := 0
 	for _, result := range results {
-		if result["valid"].(bool) {
+		status, _ := result["status"].(string)
+		switch status {
+		case string(KeyValidationValid):
 			validCount++
-		} else {
+		case string(KeyValidationInvalid):
 			invalidCount++
+		default:
+			unknownCount++
 		}
 	}
 
-	log.Printf("📊 临时分组验证结果统计: 总计=%d, 有效=%d, 无效=%d, 成功率=%.1f%%",
+	log.Printf("📊 临时分组验证结果统计: 总计=%d, 有效=%d, 无效=%d, 未知=%d, 成功率=%.1f%%",
 		len(req.APIKeys), validCount, invalidCount,
+		unknownCount,
 		float64(validCount)/float64(len(req.APIKeys))*100)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -3139,6 +3161,7 @@ func (s *MultiProviderServer) handleValidateKeysWithoutGroup(c *gin.Context) {
 		"total_keys":   len(req.APIKeys),
 		"valid_keys":   validCount,
 		"invalid_keys": invalidCount,
+		"unknown_keys": unknownCount,
 		"results":      results,
 	})
 }
@@ -3429,7 +3452,7 @@ func (s *MultiProviderServer) ensureProxyKeyInfoInContext(c *gin.Context) {
 			// 设置代理密钥信息到上下文中
 			c.Set("proxy_key_name", proxyKey.Name)
 			c.Set("proxy_key_id", proxyKey.ID)
-			
+
 			// 更新代理密钥使用次数
 			if s.proxyKeyManager != nil {
 				s.proxyKeyManager.UpdateUsage(proxyKey.Key)
@@ -3651,7 +3674,7 @@ func (s *MultiProviderServer) parseLogFilterWithRange(c *gin.Context) *logger.Lo
 	f.EndTime = end
 	return f
 }
- 
+
 func (s *MultiProviderServer) geminiAPIKeyAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var apiKey string
@@ -3738,13 +3761,13 @@ func (s *MultiProviderServer) geminiAPIKeyAuthMiddleware() gin.HandlerFunc {
 // handleForceKeyStatus 处理强行设置密钥有效状态
 func (s *MultiProviderServer) handleForceKeyStatus(c *gin.Context) {
 	groupID := c.Param("groupId")
-	
+
 	var req struct {
 		APIKey   string `json:"api_key" binding:"required"`
 		IsValid  bool   `json:"is_valid"`
 		ForceSet bool   `json:"force_set"` // 是否强制设置，忽略实际验证
 	}
-	
+
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
@@ -3752,7 +3775,7 @@ func (s *MultiProviderServer) handleForceKeyStatus(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	// 检查分组是否存在
 	group, exists := s.configManager.GetGroup(groupID)
 	if !exists {
@@ -3762,7 +3785,7 @@ func (s *MultiProviderServer) handleForceKeyStatus(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	// 检查API密钥是否属于该分组
 	keyExists := false
 	for _, key := range group.APIKeys {
@@ -3771,7 +3794,7 @@ func (s *MultiProviderServer) handleForceKeyStatus(c *gin.Context) {
 			break
 		}
 	}
-	
+
 	if !keyExists {
 		c.JSON(http.StatusNotFound, gin.H{
 			"success": false,
@@ -3779,7 +3802,7 @@ func (s *MultiProviderServer) handleForceKeyStatus(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	// 更新数据库中的验证状态
 	validationError := ""
 	if !req.IsValid {
@@ -3789,8 +3812,9 @@ func (s *MultiProviderServer) handleForceKeyStatus(c *gin.Context) {
 			validationError = "Key validation failed"
 		}
 	}
-	
-	err := s.configManager.UpdateAPIKeyValidation(groupID, req.APIKey, req.IsValid, validationError)
+
+	isValid := req.IsValid
+	err := s.configManager.UpdateAPIKeyValidation(groupID, req.APIKey, &isValid, validationError)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -3798,24 +3822,24 @@ func (s *MultiProviderServer) handleForceKeyStatus(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	// 更新密钥管理器中的状态
 	if s.keyManager != nil {
 		s.keyManager.UpdateKeyStatus(groupID, req.APIKey, req.IsValid, validationError)
 	}
-	
+
 	action := "valid"
 	if !req.IsValid {
 		action = "invalid"
 	}
-	
+
 	log.Printf("管理员强制设置密钥状态: 分组=%s, 密钥=%s, 状态=%s",
 		groupID, s.maskKey(req.APIKey), action)
-	
+
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": fmt.Sprintf("API key status has been set to %s", action),
-		"api_key": s.maskKey(req.APIKey),
+		"success":  true,
+		"message":  fmt.Sprintf("API key status has been set to %s", action),
+		"api_key":  s.maskKey(req.APIKey),
 		"is_valid": req.IsValid,
 	})
 }
@@ -3823,7 +3847,7 @@ func (s *MultiProviderServer) handleForceKeyStatus(c *gin.Context) {
 // handleDeleteInvalidKeys 处理一键删除失效密钥
 func (s *MultiProviderServer) handleDeleteInvalidKeys(c *gin.Context) {
 	groupID := c.Param("groupId")
-	
+
 	// 检查分组是否存在
 	group, exists := s.configManager.GetGroup(groupID)
 	if !exists {
@@ -3833,7 +3857,7 @@ func (s *MultiProviderServer) handleDeleteInvalidKeys(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	// 获取该分组的密钥验证状态
 	validationStatus, err := s.configManager.GetAPIKeyValidationStatus(groupID)
 	if err != nil {
@@ -3843,11 +3867,11 @@ func (s *MultiProviderServer) handleDeleteInvalidKeys(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	// 找出所有无效的密钥
 	var invalidKeys []string
 	var validKeys []string
-	
+
 	for _, apiKey := range group.APIKeys {
 		if status, exists := validationStatus[apiKey]; exists {
 			if isValid, ok := status["is_valid"].(*bool); ok && isValid != nil && !*isValid {
@@ -3860,31 +3884,31 @@ func (s *MultiProviderServer) handleDeleteInvalidKeys(c *gin.Context) {
 			validKeys = append(validKeys, apiKey)
 		}
 	}
-	
+
 	if len(invalidKeys) == 0 {
 		c.JSON(http.StatusOK, gin.H{
-			"success": true,
-			"message": "No invalid keys found to delete",
-			"deleted_count": 0,
+			"success":         true,
+			"message":         "No invalid keys found to delete",
+			"deleted_count":   0,
 			"remaining_count": len(validKeys),
 		})
 		return
 	}
-	
+
 	// 检查删除后是否还有有效密钥
 	if len(validKeys) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"success": false,
-			"message": "Cannot delete all keys. At least one valid key must remain in the group",
+			"success":       false,
+			"message":       "Cannot delete all keys. At least one valid key must remain in the group",
 			"invalid_count": len(invalidKeys),
 		})
 		return
 	}
-	
+
 	// 更新分组配置，移除无效密钥
 	updatedGroup := *group // 创建副本
 	updatedGroup.APIKeys = validKeys
-	
+
 	// 保存更新后的分组配置
 	err = s.configManager.UpdateGroup(groupID, &updatedGroup)
 	if err != nil {
@@ -3894,7 +3918,7 @@ func (s *MultiProviderServer) handleDeleteInvalidKeys(c *gin.Context) {
 		})
 		return
 	}
-	
+
 	// 更新密钥管理器
 	if s.keyManager != nil {
 		err = s.keyManager.UpdateGroupConfig(groupID, &updatedGroup)
@@ -3902,22 +3926,21 @@ func (s *MultiProviderServer) handleDeleteInvalidKeys(c *gin.Context) {
 			log.Printf("警告: 更新密钥管理器失败: %v", err)
 		}
 	}
-	
+
 	// 记录删除的密钥（用于日志）
 	maskedInvalidKeys := make([]string, len(invalidKeys))
 	for i, key := range invalidKeys {
 		maskedInvalidKeys[i] = s.maskKey(key)
 	}
-	
+
 	log.Printf("管理员删除失效密钥: 分组=%s, 删除数量=%d, 剩余数量=%d, 删除的密钥=%v",
 		groupID, len(invalidKeys), len(validKeys), maskedInvalidKeys)
-	
+
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": fmt.Sprintf("Successfully deleted %d invalid keys", len(invalidKeys)),
-		"deleted_count": len(invalidKeys),
+		"success":         true,
+		"message":         fmt.Sprintf("Successfully deleted %d invalid keys", len(invalidKeys)),
+		"deleted_count":   len(invalidKeys),
 		"remaining_count": len(validKeys),
-		"deleted_keys": maskedInvalidKeys,
+		"deleted_keys":    maskedInvalidKeys,
 	})
 }
-
