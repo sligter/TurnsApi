@@ -15,6 +15,7 @@ import (
 	"turnsapi/internal"
 	"turnsapi/internal/keymanager"
 	"turnsapi/internal/logger"
+	"turnsapi/internal/netutil"
 
 	"github.com/gin-gonic/gin"
 )
@@ -51,9 +52,7 @@ func NewOpenRouterProxy(config *internal.Config, keyManager *keymanager.KeyManag
 		config:        config,
 		keyManager:    keyManager,
 		requestLogger: requestLogger,
-		httpClient: &http.Client{
-			Timeout: config.OpenRouter.Timeout,
-		},
+		httpClient:    netutil.NewClient(config.OpenRouter.Timeout),
 	}
 }
 
@@ -378,9 +377,7 @@ func (p *OpenRouterProxy) handleStreamingRequest(c *gin.Context, req *ChatComple
 	}
 
 	// 为流式请求创建专用的HTTP客户端，使用更长的超时时间
-	streamingClient := &http.Client{
-		Timeout: 10 * time.Minute, // 流式请求使用10分钟超时
-	}
+	streamingClient := p.httpClient
 
 	// 发送请求
 	resp, err := streamingClient.Do(httpReq)
@@ -600,7 +597,7 @@ func (p *OpenRouterProxy) HandleModels(c *gin.Context) {
 	req.Header.Set("Content-Type", "application/json")
 
 	// 发送请求
-	client := &http.Client{Timeout: 10 * time.Minute}
+	client := p.httpClient
 	resp, err := client.Do(req)
 	if err != nil {
 		p.keyManager.ReportError(apiKey, err.Error())

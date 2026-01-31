@@ -19,7 +19,7 @@ import (
 
 var (
 	configPath = flag.String("config", "config/config.yaml", "配置文件路径")
-	dbPath     = flag.String("db", "data/turnsapi.db", "数据库文件路径")
+	dbPath     = flag.String("db", "", "数据库文件路径 (override; empty uses config.database)")
 	version    = "2.0.0"
 )
 
@@ -61,7 +61,7 @@ func main() {
 
 	// 创建多分组密钥管理器（快速初始化，无网络检查）
 	// 初始化数据库连接用于密钥管理器
-	groupsDB, err := database.NewGroupsDB(config.Database.Path)
+	groupsDB, err := database.NewGroupsDBWithConfig(config.Database)
 	var keyManager *keymanager.MultiGroupKeyManager
 	if err != nil {
 		log.Printf("警告: 无法初始化数据库连接用于密钥管理器: %v", err)
@@ -141,7 +141,9 @@ func performLogCleanup(config *internal.Config) {
 		return // 如果保留天数为0或负数，不执行清理
 	}
 
-	requestLogger, err := logger.NewRequestLogger(config.Database.Path)
+	cleanupLogsCfg := config.RequestLogs
+	cleanupLogsCfg.AsyncWrite = false
+	requestLogger, err := logger.NewRequestLoggerWithConfig(config.Database, cleanupLogsCfg)
 	if err != nil {
 		log.Printf("Failed to create request logger for cleanup: %v", err)
 		return

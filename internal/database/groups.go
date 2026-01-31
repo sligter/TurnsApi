@@ -7,8 +7,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
+	"turnsapi/internal/storage"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -32,7 +37,8 @@ type UserGroup struct {
 
 // GroupsDB 分组数据库管理器
 type GroupsDB struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect string
 }
 
 func configureSQLite(db *sql.DB) error {
@@ -56,8 +62,102 @@ func configureSQLite(db *sql.DB) error {
 	return nil
 }
 
+func (gdb *GroupsDB) rebind(query string) string {
+	if gdb == nil || gdb.dialect != "postgres" {
+		return query
+	}
+
+	var b strings.Builder
+	b.Grow(len(query) + 16)
+
+	inSingleQuote := false
+	arg := 1
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+		if ch == '\'' {
+			inSingleQuote = !inSingleQuote
+			b.WriteByte(ch)
+			continue
+		}
+		if ch == '?' && !inSingleQuote {
+			b.WriteByte('$')
+			b.WriteString(strconv.Itoa(arg))
+			arg++
+			continue
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
+func (gdb *GroupsDB) exec(query string, args ...interface{}) (sql.Result, error) {
+	return gdb.db.Exec(gdb.rebind(query), args...)
+}
+
+func (gdb *GroupsDB) query(query string, args ...interface{}) (*sql.Rows, error) {
+	return gdb.db.Query(gdb.rebind(query), args...)
+}
+
+func (gdb *GroupsDB) queryRow(query string, args ...interface{}) *sql.Row {
+	return gdb.db.QueryRow(gdb.rebind(query), args...)
+}
+
 // NewGroupsDB 创建新的分组数据库管理器
 func NewGroupsDB(dbPath string) (*GroupsDB, error) {
+	cfg := storage.DatabaseConfig{
+		Driver:          "sqlite",
+		Path:            dbPath,
+		MaxOpenConns:    1,
+		MaxIdleConns:    1,
+		ConnMaxLifetime: time.Hour,
+	}
+	if strings.HasPrefix(dbPath, "postgres://") || strings.HasPrefix(dbPath, "postgresql://") {
+		cfg.Driver = "postgres"
+		cfg.DSN = dbPath
+	}
+	return NewGroupsDBWithConfig(cfg)
+}
+
+func NewGroupsDBWithConfig(cfg storage.DatabaseConfig) (*GroupsDB, error) {
+	driver := strings.ToLower(strings.TrimSpace(cfg.Driver))
+	if driver == "" {
+		driver = "sqlite"
+	}
+
+	var (
+		db      *sql.DB
+		dialect string
+		err     error
+	)
+
+	switch driver {
+	case "sqlite", "sqlite3":
+		dialect = "sqlite"
+		db, err = openGroupsSQLite(cfg)
+	case "postgres", "postgresql":
+		dialect = "postgres"
+		db, err = openGroupsPostgres(cfg)
+	default:
+		return nil, fmt.Errorf("unsupported database driver: %s", driver)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	groupsDB := &GroupsDB{db: db, dialect: dialect}
+	if err := groupsDB.initTables(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize tables: %w", err)
+	}
+	return groupsDB, nil
+}
+
+func openGroupsSQLite(cfg storage.DatabaseConfig) (*sql.DB, error) {
+	dbPath := cfg.Path
+	if dbPath == "" {
+		dbPath = "data/turnsapi.db"
+	}
+
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
@@ -70,25 +170,54 @@ func NewGroupsDB(dbPath string) (*GroupsDB, error) {
 
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(time.Hour)
+	connMaxLifetime := cfg.ConnMaxLifetime
+	if connMaxLifetime <= 0 {
+		connMaxLifetime = time.Hour
+	}
+	db.SetConnMaxLifetime(connMaxLifetime)
 
 	if err := configureSQLite(db); err != nil {
 		db.Close()
 		return nil, err
 	}
 
-	groupsDB := &GroupsDB{db: db}
+	return db, nil
+}
 
-	// 初始化表结构
-	if err := groupsDB.initTables(); err != nil {
-		return nil, fmt.Errorf("failed to initialize tables: %w", err)
+func openGroupsPostgres(cfg storage.DatabaseConfig) (*sql.DB, error) {
+	if strings.TrimSpace(cfg.DSN) == "" {
+		return nil, fmt.Errorf("postgres dsn is required when driver=postgres")
 	}
 
-	return groupsDB, nil
+	db, err := sql.Open("pgx", cfg.DSN)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open postgres database: %w", err)
+	}
+
+	if cfg.MaxOpenConns > 0 {
+		db.SetMaxOpenConns(cfg.MaxOpenConns)
+	}
+	if cfg.MaxIdleConns > 0 {
+		db.SetMaxIdleConns(cfg.MaxIdleConns)
+	}
+	if cfg.ConnMaxLifetime > 0 {
+		db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+	}
+
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to ping postgres database: %w", err)
+	}
+
+	return db, nil
 }
 
 // initTables 初始化数据库表
 func (gdb *GroupsDB) initTables() error {
+	if gdb.dialect == "postgres" {
+		return gdb.initTablesPostgres()
+	}
+
 	// 创建分组表
 	createGroupsTable := `
 	CREATE TABLE IF NOT EXISTS provider_groups (
@@ -133,11 +262,11 @@ func (gdb *GroupsDB) initTables() error {
 	}
 
 	// 执行表创建
-	if _, err := gdb.db.Exec(createGroupsTable); err != nil {
+	if _, err := gdb.exec(createGroupsTable); err != nil {
 		return fmt.Errorf("failed to create provider_groups table: %w", err)
 	}
 
-	if _, err := gdb.db.Exec(createKeysTable); err != nil {
+	if _, err := gdb.exec(createKeysTable); err != nil {
 		return fmt.Errorf("failed to create provider_api_keys table: %w", err)
 	}
 
@@ -163,7 +292,64 @@ func (gdb *GroupsDB) initTables() error {
 
 	// 创建索引
 	for _, indexSQL := range createIndexes {
-		if _, err := gdb.db.Exec(indexSQL); err != nil {
+		if _, err := gdb.exec(indexSQL); err != nil {
+			return fmt.Errorf("failed to create index: %w", err)
+		}
+	}
+
+	log.Println("Provider groups database tables initialized successfully")
+	return nil
+}
+
+func (gdb *GroupsDB) initTablesPostgres() error {
+	createGroupsTable := `
+	CREATE TABLE IF NOT EXISTS provider_groups (
+		group_id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		provider_type TEXT NOT NULL,
+		base_url TEXT NOT NULL,
+		enabled BOOLEAN NOT NULL DEFAULT TRUE,
+		timeout_seconds INTEGER NOT NULL DEFAULT 30,
+		max_retries INTEGER NOT NULL DEFAULT 3,
+		rotation_strategy TEXT NOT NULL DEFAULT 'round_robin',
+		models TEXT,
+		headers TEXT,
+		request_params TEXT,
+		model_mappings TEXT,
+		use_native_response BOOLEAN NOT NULL DEFAULT FALSE,
+		rpm_limit INTEGER NOT NULL DEFAULT 0,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);`
+
+	createKeysTable := `
+	CREATE TABLE IF NOT EXISTS provider_api_keys (
+		id BIGSERIAL PRIMARY KEY,
+		group_id TEXT NOT NULL,
+		api_key TEXT NOT NULL,
+		key_order INTEGER NOT NULL DEFAULT 0,
+		is_valid BOOLEAN DEFAULT NULL,
+		last_validated_at TIMESTAMPTZ DEFAULT NULL,
+		validation_error TEXT DEFAULT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		FOREIGN KEY (group_id) REFERENCES provider_groups(group_id) ON DELETE CASCADE
+	);`
+
+	createIndexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_provider_groups_enabled ON provider_groups(enabled);`,
+		`CREATE INDEX IF NOT EXISTS idx_provider_groups_type ON provider_groups(provider_type);`,
+		`CREATE INDEX IF NOT EXISTS idx_api_keys_group_id ON provider_api_keys(group_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_api_keys_order ON provider_api_keys(group_id, key_order);`,
+	}
+
+	if _, err := gdb.exec(createGroupsTable); err != nil {
+		return fmt.Errorf("failed to create provider_groups table: %w", err)
+	}
+	if _, err := gdb.exec(createKeysTable); err != nil {
+		return fmt.Errorf("failed to create provider_api_keys table: %w", err)
+	}
+	for _, indexSQL := range createIndexes {
+		if _, err := gdb.exec(indexSQL); err != nil {
 			return fmt.Errorf("failed to create index: %w", err)
 		}
 	}
@@ -176,7 +362,7 @@ func (gdb *GroupsDB) initTables() error {
 func (gdb *GroupsDB) migrateAPIKeysTable() error {
 	// 检查字段是否已存在
 	checkColumnSQL := `PRAGMA table_info(provider_api_keys);`
-	rows, err := gdb.db.Query(checkColumnSQL)
+	rows, err := gdb.query(checkColumnSQL)
 	if err != nil {
 		return fmt.Errorf("failed to check table info: %w", err)
 	}
@@ -212,7 +398,7 @@ func (gdb *GroupsDB) migrateAPIKeysTable() error {
 
 	// 执行迁移
 	for _, migration := range migrations {
-		if _, err := gdb.db.Exec(migration); err != nil {
+		if _, err := gdb.exec(migration); err != nil {
 			return fmt.Errorf("failed to execute migration '%s': %w", migration, err)
 		}
 		log.Printf("Executed migration: %s", migration)
@@ -229,7 +415,7 @@ func (gdb *GroupsDB) migrateAPIKeysTable() error {
 func (gdb *GroupsDB) migrateRequestParamsField() error {
 	// 检查字段是否已存在
 	checkColumnSQL := `PRAGMA table_info(provider_groups);`
-	rows, err := gdb.db.Query(checkColumnSQL)
+	rows, err := gdb.query(checkColumnSQL)
 	if err != nil {
 		return fmt.Errorf("failed to check table info: %w", err)
 	}
@@ -257,7 +443,7 @@ func (gdb *GroupsDB) migrateRequestParamsField() error {
 
 	// 执行迁移
 	for _, migration := range migrations {
-		if _, err := gdb.db.Exec(migration); err != nil {
+		if _, err := gdb.exec(migration); err != nil {
 			return fmt.Errorf("failed to execute migration '%s': %w", migration, err)
 		}
 		log.Printf("Executed migration: %s", migration)
@@ -274,7 +460,7 @@ func (gdb *GroupsDB) migrateRequestParamsField() error {
 func (gdb *GroupsDB) migrateModelMappingsField() error {
 	// 检查字段是否已存在
 	checkColumnSQL := `PRAGMA table_info(provider_groups);`
-	rows, err := gdb.db.Query(checkColumnSQL)
+	rows, err := gdb.query(checkColumnSQL)
 	if err != nil {
 		return fmt.Errorf("failed to check table info: %w", err)
 	}
@@ -302,7 +488,7 @@ func (gdb *GroupsDB) migrateModelMappingsField() error {
 
 	// 执行迁移
 	for _, migration := range migrations {
-		if _, err := gdb.db.Exec(migration); err != nil {
+		if _, err := gdb.exec(migration); err != nil {
 			return fmt.Errorf("failed to execute migration '%s': %w", migration, err)
 		}
 		log.Printf("Executed migration: %s", migration)
@@ -319,7 +505,7 @@ func (gdb *GroupsDB) migrateModelMappingsField() error {
 func (gdb *GroupsDB) migrateNewFields() error {
 	// 检查字段是否已存在
 	checkColumnSQL := `PRAGMA table_info(provider_groups);`
-	rows, err := gdb.db.Query(checkColumnSQL)
+	rows, err := gdb.query(checkColumnSQL)
 	if err != nil {
 		return fmt.Errorf("failed to check table info: %w", err)
 	}
@@ -352,7 +538,7 @@ func (gdb *GroupsDB) migrateNewFields() error {
 
 	// 执行迁移
 	for _, migration := range migrations {
-		if _, err := gdb.db.Exec(migration); err != nil {
+		if _, err := gdb.exec(migration); err != nil {
 			return fmt.Errorf("failed to execute migration '%s': %w", migration, err)
 		}
 		log.Printf("Executed migration: %s", migration)
@@ -376,7 +562,7 @@ func (gdb *GroupsDB) UpdateAPIKeyValidation(groupID, apiKey string, isValid *boo
 	// 先检查记录是否存在，如果不存在则插入
 	checkSQL := `SELECT COUNT(*) FROM provider_api_keys WHERE group_id = ? AND api_key = ?`
 	var count int
-	err := gdb.db.QueryRow(checkSQL, groupID, apiKey).Scan(&count)
+	err := gdb.queryRow(checkSQL, groupID, apiKey).Scan(&count)
 	if err != nil {
 		return fmt.Errorf("failed to check API key existence: %w", err)
 	}
@@ -386,7 +572,7 @@ func (gdb *GroupsDB) UpdateAPIKeyValidation(groupID, apiKey string, isValid *boo
 		insertSQL := `
 			INSERT INTO provider_api_keys (group_id, api_key, is_valid, last_validated_at, validation_error, key_order)
 			VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, 0)`
-		_, err = gdb.db.Exec(insertSQL, groupID, apiKey, isValidValue, validationError)
+		_, err = gdb.exec(insertSQL, groupID, apiKey, isValidValue, validationError)
 		if err != nil {
 			return fmt.Errorf("failed to insert API key validation status: %w", err)
 		}
@@ -396,7 +582,7 @@ func (gdb *GroupsDB) UpdateAPIKeyValidation(groupID, apiKey string, isValid *boo
 			UPDATE provider_api_keys
 			SET is_valid = COALESCE(?, is_valid), last_validated_at = CURRENT_TIMESTAMP, validation_error = ?
 			WHERE group_id = ? AND api_key = ?`
-		_, err = gdb.db.Exec(updateSQL, isValidValue, validationError, groupID, apiKey)
+		_, err = gdb.exec(updateSQL, isValidValue, validationError, groupID, apiKey)
 		if err != nil {
 			return fmt.Errorf("failed to update API key validation status: %w", err)
 		}
@@ -413,7 +599,7 @@ func (gdb *GroupsDB) GetAPIKeyValidationStatus(groupID string) (map[string]map[s
 		WHERE group_id = ?
 		ORDER BY key_order`
 
-	rows, err := gdb.db.Query(querySQL, groupID)
+	rows, err := gdb.query(querySQL, groupID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query API key validation status: %w", err)
 	}
@@ -503,7 +689,7 @@ func (gdb *GroupsDB) SaveGroup(groupID string, group *UserGroup) error {
 		rpm_limit = excluded.rpm_limit,
 		updated_at = CURRENT_TIMESTAMP;`
 
-	_, err = tx.Exec(upsertGroupSQL,
+	_, err = tx.Exec(gdb.rebind(upsertGroupSQL),
 		groupID, group.Name, group.ProviderType, group.BaseURL,
 		group.Enabled, int(group.Timeout.Seconds()), group.MaxRetries,
 		group.RotationStrategy, string(modelsJSON), string(headersJSON), string(requestParamsJSON), string(modelMappingsJSON),
@@ -513,14 +699,14 @@ func (gdb *GroupsDB) SaveGroup(groupID string, group *UserGroup) error {
 	}
 
 	// 删除现有的API密钥
-	if _, err = tx.Exec("DELETE FROM provider_api_keys WHERE group_id = ?", groupID); err != nil {
+	if _, err = tx.Exec(gdb.rebind("DELETE FROM provider_api_keys WHERE group_id = ?"), groupID); err != nil {
 		return fmt.Errorf("failed to delete existing API keys: %w", err)
 	}
 
 	// 插入新的API密钥
 	insertKeySQL := "INSERT INTO provider_api_keys (group_id, api_key, key_order) VALUES (?, ?, ?)"
 	for i, apiKey := range group.APIKeys {
-		if _, err = tx.Exec(insertKeySQL, groupID, apiKey, i); err != nil {
+		if _, err = tx.Exec(gdb.rebind(insertKeySQL), groupID, apiKey, i); err != nil {
 			return fmt.Errorf("failed to save API key: %w", err)
 		}
 	}
@@ -547,7 +733,7 @@ func (gdb *GroupsDB) LoadGroup(groupID string) (*UserGroup, error) {
 	var requestParamsJSON, modelMappingsJSON *string // 使用指针来处理NULL值
 	var timeoutSeconds int
 
-	err := gdb.db.QueryRow(groupSQL, groupID).Scan(
+	err := gdb.queryRow(groupSQL, groupID).Scan(
 		&group.Name, &group.ProviderType, &group.BaseURL,
 		&group.Enabled, &timeoutSeconds, &group.MaxRetries, &group.RotationStrategy,
 		&modelsJSON, &headersJSON, &requestParamsJSON, &modelMappingsJSON,
@@ -591,7 +777,7 @@ func (gdb *GroupsDB) LoadGroup(groupID string) (*UserGroup, error) {
 
 	// 查询API密钥
 	keysSQL := "SELECT api_key FROM provider_api_keys WHERE group_id = ? ORDER BY key_order"
-	rows, err := gdb.db.Query(keysSQL, groupID)
+	rows, err := gdb.query(keysSQL, groupID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load API keys: %w", err)
 	}
@@ -619,7 +805,7 @@ func (gdb *GroupsDB) LoadAllGroups() (map[string]*UserGroup, error) {
 		   use_native_response, rpm_limit
 	FROM provider_groups ORDER BY created_at DESC`
 
-	rows, err := gdb.db.Query(groupsSQL)
+	rows, err := gdb.query(groupsSQL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query groups: %w", err)
 	}
@@ -682,7 +868,7 @@ func (gdb *GroupsDB) LoadAllGroups() (map[string]*UserGroup, error) {
 	// 为每个分组加载API密钥
 	for groupID, group := range groups {
 		keysSQL := "SELECT api_key FROM provider_api_keys WHERE group_id = ? ORDER BY key_order"
-		keyRows, err := gdb.db.Query(keysSQL, groupID)
+		keyRows, err := gdb.query(keysSQL, groupID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load API keys for group %s: %w", groupID, err)
 		}
@@ -713,7 +899,7 @@ func (gdb *GroupsDB) GetGroupsWithMetadata() (map[string]map[string]interface{},
 		   use_native_response, rpm_limit, created_at, updated_at
 	FROM provider_groups ORDER BY created_at DESC`
 
-	rows, err := gdb.db.Query(groupsSQL)
+	rows, err := gdb.query(groupsSQL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query groups: %w", err)
 	}
@@ -750,7 +936,7 @@ func (gdb *GroupsDB) GetGroupsWithMetadata() (map[string]map[string]interface{},
 
 		// 查询API密钥
 		keysSQL := "SELECT api_key FROM provider_api_keys WHERE group_id = ? ORDER BY key_order"
-		keyRows, err := gdb.db.Query(keysSQL, groupID)
+		keyRows, err := gdb.query(keysSQL, groupID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load API keys for group %s: %w", groupID, err)
 		}
@@ -800,12 +986,12 @@ func (gdb *GroupsDB) DeleteGroup(groupID string) error {
 	defer tx.Rollback()
 
 	// 删除API密钥（由于外键约束，会自动删除）
-	if _, err = tx.Exec("DELETE FROM provider_api_keys WHERE group_id = ?", groupID); err != nil {
+	if _, err = tx.Exec(gdb.rebind("DELETE FROM provider_api_keys WHERE group_id = ?"), groupID); err != nil {
 		return fmt.Errorf("failed to delete API keys: %w", err)
 	}
 
 	// 删除分组
-	result, err := tx.Exec("DELETE FROM provider_groups WHERE group_id = ?", groupID)
+	result, err := tx.Exec(gdb.rebind("DELETE FROM provider_groups WHERE group_id = ?"), groupID)
 	if err != nil {
 		return fmt.Errorf("failed to delete group: %w", err)
 	}
@@ -830,7 +1016,7 @@ func (gdb *GroupsDB) DeleteGroup(groupID string) error {
 // GetGroupCount 获取分组总数
 func (gdb *GroupsDB) GetGroupCount() (int, error) {
 	var count int
-	err := gdb.db.QueryRow("SELECT COUNT(*) FROM provider_groups").Scan(&count)
+	err := gdb.queryRow("SELECT COUNT(*) FROM provider_groups").Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get group count: %w", err)
 	}
@@ -840,7 +1026,7 @@ func (gdb *GroupsDB) GetGroupCount() (int, error) {
 // GetEnabledGroupCount 获取启用的分组数量
 func (gdb *GroupsDB) GetEnabledGroupCount() (int, error) {
 	var count int
-	err := gdb.db.QueryRow("SELECT COUNT(*) FROM provider_groups WHERE enabled = 1").Scan(&count)
+	err := gdb.queryRow("SELECT COUNT(*) FROM provider_groups WHERE enabled = TRUE").Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get enabled group count: %w", err)
 	}
@@ -853,7 +1039,7 @@ func (gdb *GroupsDB) UpdateAPIKeyUsageStats(groupID, apiKey string, isSuccess bo
 	// 检查记录是否存在
 	checkSQL := `SELECT COUNT(*) FROM provider_api_keys WHERE group_id = ? AND api_key = ?`
 	var count int
-	err := gdb.db.QueryRow(checkSQL, groupID, apiKey).Scan(&count)
+	err := gdb.queryRow(checkSQL, groupID, apiKey).Scan(&count)
 	if err != nil {
 		return fmt.Errorf("failed to check API key existence: %w", err)
 	}
@@ -863,7 +1049,7 @@ func (gdb *GroupsDB) UpdateAPIKeyUsageStats(groupID, apiKey string, isSuccess bo
 		insertSQL := `
 			INSERT INTO provider_api_keys (group_id, api_key, is_valid, last_validated_at, validation_error, key_order)
 			VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, 0)`
-		_, err = gdb.db.Exec(insertSQL, groupID, apiKey, isSuccess, errorMsg)
+		_, err = gdb.exec(insertSQL, groupID, apiKey, isSuccess, errorMsg)
 		if err != nil {
 			return fmt.Errorf("failed to insert API key usage stats: %w", err)
 		}
@@ -886,7 +1072,7 @@ func (gdb *GroupsDB) UpdateAPIKeyUsageStats(groupID, apiKey string, isSuccess bo
 			args = []interface{}{errorMsg, groupID, apiKey}
 		}
 
-		_, err = gdb.db.Exec(updateSQL, args...)
+		_, err = gdb.exec(updateSQL, args...)
 		if err != nil {
 			return fmt.Errorf("failed to update API key usage stats: %w", err)
 		}
@@ -901,13 +1087,13 @@ func (gdb *GroupsDB) GetKeyHealthStatistics() (map[string]interface{}, error) {
 		SELECT
 			group_id,
 			COUNT(*) as total_keys,
-			SUM(CASE WHEN is_valid = 1 THEN 1 ELSE 0 END) as valid_keys,
-			SUM(CASE WHEN is_valid = 0 THEN 1 ELSE 0 END) as invalid_keys,
+			SUM(CASE WHEN is_valid = TRUE THEN 1 ELSE 0 END) as valid_keys,
+			SUM(CASE WHEN is_valid = FALSE THEN 1 ELSE 0 END) as invalid_keys,
 			SUM(CASE WHEN is_valid IS NULL THEN 1 ELSE 0 END) as untested_keys
 		FROM provider_api_keys
 		GROUP BY group_id`
 
-	rows, err := gdb.db.Query(querySQL)
+	rows, err := gdb.query(querySQL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query key health statistics: %w", err)
 	}

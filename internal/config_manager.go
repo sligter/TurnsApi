@@ -3,6 +3,7 @@ package internal
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"turnsapi/internal/database"
@@ -55,6 +56,20 @@ type ConfigManager struct {
 	mutex    sync.RWMutex
 }
 
+func looksLikePostgresDSN(s string) bool {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		return false
+	}
+	if strings.HasPrefix(s, "postgres://") || strings.HasPrefix(s, "postgresql://") {
+		return true
+	}
+	if strings.Contains(s, "host=") && strings.Contains(s, "user=") {
+		return true
+	}
+	return false
+}
+
 // NewConfigManager 创建新的配置管理器
 func NewConfigManager(configPath string, dbPath string) (*ConfigManager, error) {
 	// 加载YAML配置
@@ -63,8 +78,21 @@ func NewConfigManager(configPath string, dbPath string) (*ConfigManager, error) 
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
+	override := strings.TrimSpace(dbPath)
+	if override != "" {
+		if looksLikePostgresDSN(override) {
+			config.Database.Driver = "postgres"
+			config.Database.DSN = override
+			config.Database.Path = ""
+		} else {
+			config.Database.Driver = "sqlite"
+			config.Database.Path = override
+			config.Database.DSN = ""
+		}
+	}
+
 	// 初始化数据库
-	groupsDB, err := database.NewGroupsDB(dbPath)
+	groupsDB, err := database.NewGroupsDBWithConfig(config.Database)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize groups database: %w", err)
 	}

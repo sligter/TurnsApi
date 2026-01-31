@@ -160,7 +160,29 @@ logging:
   max_backups: 5
   max_age: 30      # 天
 
-# 数据库配置（支持实时密钥状态更新）
+# 数据库配置（高并发推荐 Postgres）
 database:
-  path: "data/turnsapi.db"
+  # driver: "sqlite" | "postgres"
+  driver: "postgres"
+
+  # sqlite
+  # path: "data/turnsapi.db"
+
+  # postgres（示例：docker-compose 内使用 postgres 服务名；容器内走 5432）
+  dsn: "postgres://turnsapi:turnsapi@postgres:5432/turnsapi?sslmode=disable"
+  # 如果你在宿主机直连（docker-compose 映射端口默认 5435），可用：
+  # dsn: "postgres://turnsapi:turnsapi@localhost:5435/turnsapi?sslmode=disable"
+
+  # 连接池（postgres 生效；sqlite 会强制为单连接）
+  max_open_conns: 50
+  max_idle_conns: 10
+  conn_max_lifetime: "1h"
+
   retention_days: 30  # 日志保留天数
+
+# 请求日志写入优化（高并发推荐开启异步批量写入）
+request_logs:
+  async_write: true
+  buffer: 10000
+  batch_size: 200
+  flush_interval: "200ms"

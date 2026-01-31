@@ -15,6 +15,7 @@ import (
 	"turnsapi/internal/auth"
 	"turnsapi/internal/keymanager"
 	"turnsapi/internal/logger"
+	"turnsapi/internal/netutil"
 	"turnsapi/internal/providers"
 	"turnsapi/internal/proxy"
 	"turnsapi/internal/proxykey"
@@ -63,7 +64,7 @@ func NewServer(config *internal.Config, keyManager *keymanager.KeyManager) *Serv
 	}
 
 	// 创建请求日志记录器
-	requestLogger, err := logger.NewRequestLogger(config.Database.Path)
+	requestLogger, err := logger.NewRequestLoggerWithConfig(config.Database, config.RequestLogs)
 	if err != nil {
 		log.Printf("Failed to create request logger: %v", err)
 		// 继续运行，但不记录请求日志
@@ -624,8 +625,11 @@ func (s *Server) handleHealth(c *gin.Context) {
 // Start 启动服务器
 func (s *Server) Start() error {
 	s.httpServer = &http.Server{
-		Addr:    s.config.GetAddress(),
-		Handler: s.router,
+		Addr:              s.config.GetAddress(),
+		Handler:           s.router,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	log.Printf("Starting server on %s", s.config.GetAddress())
@@ -680,7 +684,7 @@ func (s *Server) handleAvailableModels(c *gin.Context) {
 	req.Header.Set("Content-Type", "application/json")
 
 	// 发送请求
-	client := &http.Client{Timeout: 10 * time.Minute}
+	client := netutil.NewClient(s.config.OpenRouter.Timeout)
 	resp, err := client.Do(req)
 	if err != nil {
 		s.keyManager.ReportError(apiKey, err.Error())

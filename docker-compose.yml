@@ -1,12 +1,34 @@
-version: '3.8'
-
 services:
+  postgres:
+    image: postgres:16
+    container_name: turnsapi-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: turnsapi
+      POSTGRES_USER: turnsapi
+      POSTGRES_PASSWORD: turnsapi
+      TZ: Asia/Shanghai
+    ports:
+      - "5435:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U turnsapi -d turnsapi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - turnsapi-network
+
   turnsapi:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: turnsapi
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "6001:8080"
 

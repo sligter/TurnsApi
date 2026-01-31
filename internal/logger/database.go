@@ -7,15 +7,20 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"turnsapi/internal/storage"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 // Database 数据库管理器
 type Database struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect string
 }
 
 // NewDatabase 创建新的数据库管理器
@@ -41,7 +46,7 @@ func NewDatabase(dbPath string) (*Database, error) {
 		return nil, err
 	}
 
-	database := &Database{db: db}
+	database := &Database{db: db, dialect: "sqlite"}
 
 	// 初始化数据库表
 	if err := database.initTables(); err != nil {
@@ -56,6 +61,104 @@ func NewDatabase(dbPath string) (*Database, error) {
 	}
 
 	return database, nil
+}
+
+func NewDatabaseWithConfig(cfg storage.DatabaseConfig) (*Database, error) {
+	driver := strings.ToLower(strings.TrimSpace(cfg.Driver))
+	if driver == "" {
+		driver = "sqlite"
+	}
+
+	var (
+		db      *sql.DB
+		dialect string
+		err     error
+	)
+
+	switch driver {
+	case "sqlite", "sqlite3":
+		dialect = "sqlite"
+		db, err = openSQLiteWithConfig(cfg)
+	case "postgres", "postgresql":
+		dialect = "postgres"
+		db, err = openPostgresWithConfig(cfg)
+	default:
+		return nil, fmt.Errorf("unsupported database driver: %s", driver)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	database := &Database{db: db, dialect: dialect}
+	if err := database.initTables(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize tables: %w", err)
+	}
+	if err := database.migrate(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate database: %w", err)
+	}
+	return database, nil
+}
+
+func openSQLiteWithConfig(cfg storage.DatabaseConfig) (*sql.DB, error) {
+	dbPath := cfg.Path
+	if dbPath == "" {
+		dbPath = "data/turnsapi.db"
+	}
+
+	dir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create database directory: %w", err)
+	}
+
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	connMaxLifetime := cfg.ConnMaxLifetime
+	if connMaxLifetime <= 0 {
+		connMaxLifetime = time.Hour
+	}
+	db.SetConnMaxLifetime(connMaxLifetime)
+
+	if err := configureSQLite(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	return db, nil
+}
+
+func openPostgresWithConfig(cfg storage.DatabaseConfig) (*sql.DB, error) {
+	if strings.TrimSpace(cfg.DSN) == "" {
+		return nil, fmt.Errorf("postgres dsn is required when driver=postgres")
+	}
+
+	db, err := sql.Open("pgx", cfg.DSN)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open postgres database: %w", err)
+	}
+
+	if cfg.MaxOpenConns > 0 {
+		db.SetMaxOpenConns(cfg.MaxOpenConns)
+	}
+	if cfg.MaxIdleConns > 0 {
+		db.SetMaxIdleConns(cfg.MaxIdleConns)
+	}
+	if cfg.ConnMaxLifetime > 0 {
+		db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+	}
+
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to ping postgres database: %w", err)
+	}
+
+	return db, nil
 }
 
 func configureSQLite(db *sql.DB) error {
@@ -75,6 +178,46 @@ func configureSQLite(db *sql.DB) error {
 	return nil
 }
 
+func (d *Database) rebind(query string) string {
+	if d == nil || d.dialect != "postgres" {
+		return query
+	}
+
+	var b strings.Builder
+	b.Grow(len(query) + 16)
+
+	inSingleQuote := false
+	arg := 1
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+		if ch == '\'' {
+			inSingleQuote = !inSingleQuote
+			b.WriteByte(ch)
+			continue
+		}
+		if ch == '?' && !inSingleQuote {
+			b.WriteByte('$')
+			b.WriteString(strconv.Itoa(arg))
+			arg++
+			continue
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
+func (d *Database) exec(query string, args ...interface{}) (sql.Result, error) {
+	return d.db.Exec(d.rebind(query), args...)
+}
+
+func (d *Database) query(query string, args ...interface{}) (*sql.Rows, error) {
+	return d.db.Query(d.rebind(query), args...)
+}
+
+func (d *Database) queryRow(query string, args ...interface{}) *sql.Row {
+	return d.db.QueryRow(d.rebind(query), args...)
+}
+
 // Close 关闭数据库连接
 func (d *Database) Close() error {
 	if d.db != nil {
@@ -85,6 +228,10 @@ func (d *Database) Close() error {
 
 // initTables 初始化数据库表
 func (d *Database) initTables() error {
+	if d.dialect == "postgres" {
+		return d.initTablesPostgres()
+	}
+
 	createTableSQL := `
 	-- 代理服务API密钥表
 	CREATE TABLE IF NOT EXISTS proxy_keys (
@@ -154,11 +301,73 @@ func (d *Database) initTables() error {
 	return nil
 }
 
+func (d *Database) initTablesPostgres() error {
+	createTableSQL := `
+	CREATE TABLE IF NOT EXISTS proxy_keys (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		description TEXT,
+		key TEXT NOT NULL UNIQUE,
+		allowed_groups TEXT,
+		group_selection_config TEXT,
+		is_active BOOLEAN NOT NULL DEFAULT TRUE,
+		usage_count BIGINT NOT NULL DEFAULT 0,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		last_used_at TIMESTAMPTZ
+	);
+
+	CREATE TABLE IF NOT EXISTS request_logs (
+		id BIGSERIAL PRIMARY KEY,
+		proxy_key_name TEXT NOT NULL,
+		proxy_key_id TEXT NOT NULL,
+		provider_group TEXT NOT NULL DEFAULT '',
+		openrouter_key TEXT NOT NULL,
+		model TEXT NOT NULL,
+		request_body TEXT NOT NULL,
+		response_body TEXT,
+		status_code INTEGER NOT NULL,
+		is_stream BOOLEAN NOT NULL DEFAULT FALSE,
+		duration BIGINT NOT NULL DEFAULT 0,
+		tokens_used BIGINT NOT NULL DEFAULT 0,
+		tokens_estimated BOOLEAN NOT NULL DEFAULT FALSE,
+		error TEXT,
+		client_ip TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		has_tool_calls BOOLEAN NOT NULL DEFAULT FALSE,
+		tool_calls_count INTEGER NOT NULL DEFAULT 0,
+		tool_names TEXT NOT NULL DEFAULT ''
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_proxy_keys_name ON proxy_keys(name);
+	CREATE INDEX IF NOT EXISTS idx_proxy_keys_key ON proxy_keys(key);
+	CREATE INDEX IF NOT EXISTS idx_proxy_keys_is_active ON proxy_keys(is_active);
+
+	CREATE INDEX IF NOT EXISTS idx_request_logs_proxy_key_id ON request_logs(proxy_key_id);
+	CREATE INDEX IF NOT EXISTS idx_request_logs_proxy_key_name ON request_logs(proxy_key_name);
+	CREATE INDEX IF NOT EXISTS idx_request_logs_provider_group ON request_logs(provider_group);
+	CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model);
+	CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at);
+	CREATE INDEX IF NOT EXISTS idx_request_logs_status_code ON request_logs(status_code);
+	`
+
+	if _, err := d.db.Exec(createTableSQL); err != nil {
+		return fmt.Errorf("failed to create tables: %w", err)
+	}
+
+	log.Println("Database tables initialized successfully")
+	return nil
+}
+
 // migrateProxyKeysTable 迁移proxy_keys表，添加usage_count字段
 func (d *Database) migrateProxyKeysTable() error {
+	if d.dialect == "postgres" {
+		return nil
+	}
+
 	// 检查usage_count字段是否存在
 	checkSQL := `PRAGMA table_info(proxy_keys)`
-	rows, err := d.db.Query(checkSQL)
+	rows, err := d.query(checkSQL)
 	if err != nil {
 		return fmt.Errorf("failed to check table info: %w", err)
 	}
@@ -183,7 +392,7 @@ func (d *Database) migrateProxyKeysTable() error {
 	// 如果没有usage_count字段，则添加
 	if !hasUsageCount {
 		alterSQL := `ALTER TABLE proxy_keys ADD COLUMN usage_count INTEGER NOT NULL DEFAULT 0`
-		_, err := d.db.Exec(alterSQL)
+		_, err := d.exec(alterSQL)
 		if err != nil {
 			return fmt.Errorf("failed to add usage_count column: %w", err)
 		}
@@ -195,9 +404,13 @@ func (d *Database) migrateProxyKeysTable() error {
 
 // migrateDatabase 执行数据库迁移
 func (d *Database) migrateDatabase() error {
+	if d.dialect == "postgres" {
+		return nil
+	}
+
 	// 检查proxy_keys表是否有allowed_groups列
 	var columnExists bool
-	err := d.db.QueryRow(`
+	err := d.queryRow(`
 		SELECT COUNT(*) > 0
 		FROM pragma_table_info('proxy_keys')
 		WHERE name = 'allowed_groups'
@@ -210,7 +423,7 @@ func (d *Database) migrateDatabase() error {
 	// 如果列不存在，添加它
 	if !columnExists {
 		log.Println("Adding allowed_groups column to proxy_keys table...")
-		_, err = d.db.Exec(`ALTER TABLE proxy_keys ADD COLUMN allowed_groups TEXT`)
+		_, err = d.exec(`ALTER TABLE proxy_keys ADD COLUMN allowed_groups TEXT`)
 		if err != nil {
 			return fmt.Errorf("failed to add allowed_groups column: %w", err)
 		}
@@ -218,7 +431,7 @@ func (d *Database) migrateDatabase() error {
 	}
 
 	// 检查proxy_keys表是否有group_selection_config列
-	err = d.db.QueryRow(`
+	err = d.queryRow(`
 		SELECT COUNT(*) > 0
 		FROM pragma_table_info('proxy_keys')
 		WHERE name = 'group_selection_config'
@@ -231,7 +444,7 @@ func (d *Database) migrateDatabase() error {
 	// 如果列不存在，添加它
 	if !columnExists {
 		log.Println("Adding group_selection_config column to proxy_keys table...")
-		_, err = d.db.Exec(`ALTER TABLE proxy_keys ADD COLUMN group_selection_config TEXT`)
+		_, err = d.exec(`ALTER TABLE proxy_keys ADD COLUMN group_selection_config TEXT`)
 		if err != nil {
 			return fmt.Errorf("failed to add group_selection_config column: %w", err)
 		}
@@ -239,7 +452,7 @@ func (d *Database) migrateDatabase() error {
 	}
 
 	// 检查request_logs表是否有client_ip列
-	err = d.db.QueryRow(`
+	err = d.queryRow(`
 		SELECT COUNT(*) > 0
 		FROM pragma_table_info('request_logs')
 		WHERE name = 'client_ip'
@@ -252,7 +465,7 @@ func (d *Database) migrateDatabase() error {
 	// 如果列不存在，添加它
 	if !columnExists {
 		log.Println("Adding client_ip column to request_logs table...")
-		_, err = d.db.Exec(`ALTER TABLE request_logs ADD COLUMN client_ip TEXT NOT NULL DEFAULT ''`)
+		_, err = d.exec(`ALTER TABLE request_logs ADD COLUMN client_ip TEXT NOT NULL DEFAULT ''`)
 		if err != nil {
 			return fmt.Errorf("failed to add client_ip column: %w", err)
 		}
@@ -260,7 +473,7 @@ func (d *Database) migrateDatabase() error {
 	}
 
 	// 检查request_logs表是否有tokens_estimated列
-	err = d.db.QueryRow(`
+	err = d.queryRow(`
 		SELECT COUNT(*) > 0
 		FROM pragma_table_info('request_logs')
 		WHERE name = 'tokens_estimated'
@@ -273,7 +486,7 @@ func (d *Database) migrateDatabase() error {
 	// 如果列不存在，添加它
 	if !columnExists {
 		log.Println("Adding tokens_estimated column to request_logs table...")
-		_, err = d.db.Exec(`ALTER TABLE request_logs ADD COLUMN tokens_estimated BOOLEAN NOT NULL DEFAULT 0`)
+		_, err = d.exec(`ALTER TABLE request_logs ADD COLUMN tokens_estimated BOOLEAN NOT NULL DEFAULT 0`)
 		if err != nil {
 			return fmt.Errorf("failed to add tokens_estimated column: %w", err)
 		}
@@ -283,7 +496,7 @@ func (d *Database) migrateDatabase() error {
 	// 检查request_logs表是否有工具调用相关字段
 	toolCallFields := []string{"has_tool_calls", "tool_calls_count", "tool_names"}
 	for _, field := range toolCallFields {
-		err = d.db.QueryRow(`
+		err = d.queryRow(`
 			SELECT COUNT(*) > 0
 			FROM pragma_table_info('request_logs')
 			WHERE name = ?
@@ -306,7 +519,7 @@ func (d *Database) migrateDatabase() error {
 			}
 
 			log.Printf("Adding %s column to request_logs table...", field)
-			_, err = d.db.Exec(alterSQL)
+			_, err = d.exec(alterSQL)
 			if err != nil {
 				return fmt.Errorf("failed to add %s column: %w", field, err)
 			}
@@ -319,9 +532,13 @@ func (d *Database) migrateDatabase() error {
 
 // migrate 执行数据库迁移
 func (d *Database) migrate() error {
+	if d.dialect == "postgres" {
+		return nil
+	}
+
 	// 检查是否需要添加provider_group字段
 	var columnExists bool
-	err := d.db.QueryRow(`
+	err := d.queryRow(`
 		SELECT COUNT(*) > 0
 		FROM pragma_table_info('request_logs')
 		WHERE name = 'provider_group'
@@ -334,13 +551,13 @@ func (d *Database) migrate() error {
 	// 如果字段不存在，添加它
 	if !columnExists {
 		log.Printf("Adding provider_group column to request_logs table...")
-		_, err = d.db.Exec(`ALTER TABLE request_logs ADD COLUMN provider_group TEXT NOT NULL DEFAULT ''`)
+		_, err = d.exec(`ALTER TABLE request_logs ADD COLUMN provider_group TEXT NOT NULL DEFAULT ''`)
 		if err != nil {
 			return fmt.Errorf("failed to add provider_group column: %w", err)
 		}
 
 		// 添加索引
-		_, err = d.db.Exec(`CREATE INDEX IF NOT EXISTS idx_request_logs_provider_group ON request_logs(provider_group)`)
+		_, err = d.exec(`CREATE INDEX IF NOT EXISTS idx_request_logs_provider_group ON request_logs(provider_group)`)
 		if err != nil {
 			return fmt.Errorf("failed to create provider_group index: %w", err)
 		}
@@ -361,12 +578,22 @@ func (d *Database) InsertRequestLog(log *RequestLog) error {
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
-	result, err := d.db.Exec(query,
+	args := []interface{}{
 		log.ProxyKeyName, log.ProxyKeyID, log.ProviderGroup, log.OpenRouterKey, log.Model,
 		log.RequestBody, log.ResponseBody, log.StatusCode, log.IsStream,
 		log.Duration, log.TokensUsed, log.TokensEstimated, log.Error, log.ClientIP, log.CreatedAt,
 		log.HasToolCalls, log.ToolCallsCount, log.ToolNames,
-	)
+	}
+
+	if d.dialect == "postgres" {
+		returningQuery := strings.TrimSpace(query) + " RETURNING id"
+		if err := d.queryRow(returningQuery, args...).Scan(&log.ID); err != nil {
+			return fmt.Errorf("failed to insert request log: %w", err)
+		}
+		return nil
+	}
+
+	result, err := d.exec(query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to insert request log: %w", err)
 	}
@@ -377,6 +604,50 @@ func (d *Database) InsertRequestLog(log *RequestLog) error {
 	}
 
 	log.ID = id
+	return nil
+}
+
+func (d *Database) InsertRequestLogsBatch(logs []*RequestLog) error {
+	if len(logs) == 0 {
+		return nil
+	}
+
+	query := `
+	INSERT INTO request_logs (
+		proxy_key_name, proxy_key_id, provider_group, openrouter_key, model, request_body, response_body,
+		status_code, is_stream, duration, tokens_used, tokens_estimated, error, client_ip, created_at,
+		has_tool_calls, tool_calls_count, tool_names
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	stmt, err := tx.Prepare(d.rebind(query))
+	if err != nil {
+		return fmt.Errorf("failed to prepare batch insert: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, row := range logs {
+		if _, err := stmt.Exec(
+			row.ProxyKeyName, row.ProxyKeyID, row.ProviderGroup, row.OpenRouterKey, row.Model,
+			row.RequestBody, row.ResponseBody, row.StatusCode, row.IsStream,
+			row.Duration, row.TokensUsed, row.TokensEstimated, row.Error, row.ClientIP, row.CreatedAt,
+			row.HasToolCalls, row.ToolCallsCount, row.ToolNames,
+		); err != nil {
+			return fmt.Errorf("failed to exec batch insert: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit batch insert: %w", err)
+	}
 	return nil
 }
 
@@ -411,7 +682,7 @@ func (d *Database) GetRequestLogs(proxyKeyName, providerGroup string, limit, off
 	query += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
 
-	rows, err := d.db.Query(query, args...)
+	rows, err := d.query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query request logs: %w", err)
 	}
@@ -467,9 +738,9 @@ func (d *Database) GetRequestLogsWithFilter(filter *LogFilter) ([]*RequestLogSum
 
 	if filter.Stream != "" {
 		if filter.Stream == "true" {
-			conditions = append(conditions, "is_stream = 1")
+			conditions = append(conditions, "is_stream = TRUE")
 		} else if filter.Stream == "false" {
-			conditions = append(conditions, "is_stream = 0")
+			conditions = append(conditions, "is_stream = FALSE")
 		}
 	}
 
@@ -487,7 +758,7 @@ func (d *Database) GetRequestLogsWithFilter(filter *LogFilter) ([]*RequestLogSum
 	query += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
 	args = append(args, filter.Limit, filter.Offset)
 
-	rows, err := d.db.Query(query, args...)
+	rows, err := d.query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query request logs with filter: %w", err)
 	}
@@ -543,9 +814,9 @@ func (d *Database) GetRequestCountWithFilter(filter *LogFilter) (int64, error) {
 
 	if filter.Stream != "" {
 		if filter.Stream == "true" {
-			conditions = append(conditions, "is_stream = 1")
+			conditions = append(conditions, "is_stream = TRUE")
 		} else if filter.Stream == "false" {
-			conditions = append(conditions, "is_stream = 0")
+			conditions = append(conditions, "is_stream = FALSE")
 		}
 	}
 
@@ -556,7 +827,7 @@ func (d *Database) GetRequestCountWithFilter(filter *LogFilter) (int64, error) {
 	}
 
 	var count int64
-	err := d.db.QueryRow(query, args...).Scan(&count)
+	err := d.queryRow(query, args...).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get request count with filter: %w", err)
 	}
@@ -575,7 +846,7 @@ func (d *Database) GetRequestLogDetail(id int64) (*RequestLog, error) {
 	`
 
 	log := &RequestLog{}
-	err := d.db.QueryRow(query, id).Scan(
+	err := d.queryRow(query, id).Scan(
 		&log.ID, &log.ProxyKeyName, &log.ProxyKeyID, &log.ProviderGroup, &log.OpenRouterKey, &log.Model,
 		&log.RequestBody, &log.ResponseBody, &log.StatusCode, &log.IsStream,
 		&log.Duration, &log.TokensUsed, &log.TokensEstimated, &log.Error, &log.ClientIP, &log.CreatedAt,
@@ -607,7 +878,7 @@ func (d *Database) GetProxyKeyStats() ([]*ProxyKeyStats, error) {
 	ORDER BY total_requests DESC
 	`
 
-	rows, err := d.db.Query(query)
+	rows, err := d.query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query proxy key stats: %w", err)
 	}
@@ -643,7 +914,7 @@ func (d *Database) GetModelStats() ([]*ModelStats, error) {
 	ORDER BY total_requests DESC
 	`
 
-	rows, err := d.db.Query(query)
+	rows, err := d.query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query model stats: %w", err)
 	}
@@ -689,9 +960,9 @@ func (d *Database) GetModelStatsWithFilter(filter *LogFilter) ([]*ModelStats, er
 		}
 		if filter.Stream != "" {
 			if filter.Stream == "true" {
-				conds = append(conds, "is_stream = 1")
+				conds = append(conds, "is_stream = TRUE")
 			} else if filter.Stream == "false" {
-				conds = append(conds, "is_stream = 0")
+				conds = append(conds, "is_stream = FALSE")
 			}
 		}
 		if filter.StartTime != nil {
@@ -718,7 +989,7 @@ func (d *Database) GetModelStatsWithFilter(filter *LogFilter) ([]*ModelStats, er
 
 	query += " GROUP BY model ORDER BY total_requests DESC"
 
-	rows, err := d.db.Query(query, args...)
+	rows, err := d.query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query model stats with filter: %w", err)
 	}
@@ -751,7 +1022,7 @@ func (d *Database) GetTotalTokensStats() (*TotalTokensStats, error) {
 	`
 
 	stats := &TotalTokensStats{}
-	err := d.db.QueryRow(query).Scan(
+	err := d.queryRow(query).Scan(
 		&stats.TotalTokens, &stats.SuccessTokens, &stats.TotalRequests, &stats.SuccessRequests,
 	)
 	if err != nil {
@@ -785,7 +1056,7 @@ func (d *Database) GetRequestCount(proxyKeyName, providerGroup string) (int64, e
 	}
 
 	var count int64
-	err := d.db.QueryRow(query, args...).Scan(&count)
+	err := d.queryRow(query, args...).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get request count: %w", err)
 	}
@@ -810,7 +1081,7 @@ func (d *Database) InsertProxyKey(key *ProxyKey) error {
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
-	_, err := d.db.Exec(query,
+	_, err := d.exec(query,
 		key.ID, key.Name, key.Description, key.Key, allowedGroupsJSON, key.GroupSelectionConfig, key.IsActive, key.UsageCount,
 		key.CreatedAt, key.UpdatedAt,
 	)
@@ -826,13 +1097,13 @@ func (d *Database) GetProxyKey(keyValue string) (*ProxyKey, error) {
 	query := `
 	SELECT id, name, description, key, allowed_groups, group_selection_config, is_active, usage_count, created_at, updated_at, last_used_at
 	FROM proxy_keys
-	WHERE key = ? AND is_active = 1
+	WHERE key = ? AND is_active = TRUE
 	`
 
 	key := &ProxyKey{}
 	var allowedGroupsJSON string
 	var groupSelectionConfigJSON sql.NullString
-	err := d.db.QueryRow(query, keyValue).Scan(
+	err := d.queryRow(query, keyValue).Scan(
 		&key.ID, &key.Name, &key.Description, &key.Key, &allowedGroupsJSON, &groupSelectionConfigJSON, &key.IsActive,
 		&key.UsageCount, &key.CreatedAt, &key.UpdatedAt, &key.LastUsedAt,
 	)
@@ -870,7 +1141,7 @@ func (d *Database) GetAllProxyKeys() ([]*ProxyKey, error) {
 	ORDER BY created_at DESC
 	`
 
-	rows, err := d.db.Query(query)
+	rows, err := d.query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query proxy keys: %w", err)
 	}
@@ -929,7 +1200,7 @@ func (d *Database) UpdateProxyKey(key *ProxyKey) error {
 	`
 
 	now := time.Now()
-	_, err := d.db.Exec(query,
+	_, err := d.exec(query,
 		key.Name, key.Description, allowedGroupsJSON, key.GroupSelectionConfig, key.IsActive, key.UsageCount, now, key.ID,
 	)
 	if err != nil {
@@ -944,7 +1215,7 @@ func (d *Database) UpdateProxyKeyLastUsed(keyID string) error {
 	query := `UPDATE proxy_keys SET last_used_at = ?, updated_at = ? WHERE id = ?`
 
 	now := time.Now()
-	_, err := d.db.Exec(query, now, now, keyID)
+	_, err := d.exec(query, now, now, keyID)
 	if err != nil {
 		return fmt.Errorf("failed to update proxy key last used: %w", err)
 	}
@@ -957,7 +1228,7 @@ func (d *Database) UpdateProxyKeyUsage(keyID string) error {
 	query := `UPDATE proxy_keys SET usage_count = usage_count + 1, last_used_at = ?, updated_at = ? WHERE id = ?`
 
 	now := time.Now()
-	_, err := d.db.Exec(query, now, now, keyID)
+	_, err := d.exec(query, now, now, keyID)
 	if err != nil {
 		return fmt.Errorf("failed to update proxy key usage: %w", err)
 	}
@@ -969,7 +1240,7 @@ func (d *Database) UpdateProxyKeyUsage(keyID string) error {
 func (d *Database) DeleteProxyKey(keyID string) error {
 	query := `DELETE FROM proxy_keys WHERE id = ?`
 
-	_, err := d.db.Exec(query, keyID)
+	_, err := d.exec(query, keyID)
 	if err != nil {
 		return fmt.Errorf("failed to delete proxy key: %w", err)
 	}
@@ -980,8 +1251,11 @@ func (d *Database) DeleteProxyKey(keyID string) error {
 // CleanupOldLogs 清理旧日志（保留指定天数的日志）
 func (d *Database) CleanupOldLogs(retentionDays int) error {
 	query := `DELETE FROM request_logs WHERE created_at < datetime('now', '-' || ? || ' days')`
+	if d.dialect == "postgres" {
+		query = `DELETE FROM request_logs WHERE created_at < NOW() - (? * INTERVAL '1 day')`
+	}
 
-	result, err := d.db.Exec(query, retentionDays)
+	result, err := d.exec(query, retentionDays)
 	if err != nil {
 		return fmt.Errorf("failed to cleanup old logs: %w", err)
 	}
@@ -1011,7 +1285,7 @@ func (d *Database) DeleteRequestLogs(ids []int64) (int64, error) {
 
 	query := fmt.Sprintf("DELETE FROM request_logs WHERE id IN (%s)", strings.Join(placeholders, ","))
 
-	result, err := d.db.Exec(query, args...)
+	result, err := d.exec(query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete request logs: %w", err)
 	}
@@ -1028,7 +1302,7 @@ func (d *Database) DeleteRequestLogs(ids []int64) (int64, error) {
 func (d *Database) ClearAllRequestLogs() (int64, error) {
 	query := `DELETE FROM request_logs`
 
-	result, err := d.db.Exec(query)
+	result, err := d.exec(query)
 	if err != nil {
 		return 0, fmt.Errorf("failed to clear all request logs: %w", err)
 	}
@@ -1045,7 +1319,7 @@ func (d *Database) ClearAllRequestLogs() (int64, error) {
 func (d *Database) ClearErrorRequestLogs() (int64, error) {
 	query := `DELETE FROM request_logs WHERE status_code != 200`
 
-	result, err := d.db.Exec(query)
+	result, err := d.exec(query)
 	if err != nil {
 		return 0, fmt.Errorf("failed to clear error request logs: %w", err)
 	}
@@ -1088,7 +1362,7 @@ func (d *Database) GetAllRequestLogsForExport(proxyKeyName, providerGroup string
 
 	query += " ORDER BY created_at DESC, id DESC"
 
-	rows, err := d.db.Query(query, args...)
+	rows, err := d.query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query request logs for export: %w", err)
 	}
@@ -1144,9 +1418,9 @@ func (d *Database) GetAllRequestLogsForExportWithFilter(filter *LogFilter) ([]*R
 
 	if filter.Stream != "" {
 		if filter.Stream == "true" {
-			conditions = append(conditions, "is_stream = 1")
+			conditions = append(conditions, "is_stream = TRUE")
 		} else if filter.Stream == "false" {
-			conditions = append(conditions, "is_stream = 0")
+			conditions = append(conditions, "is_stream = FALSE")
 		}
 	}
 
@@ -1163,7 +1437,7 @@ func (d *Database) GetAllRequestLogsForExportWithFilter(filter *LogFilter) ([]*R
 
 	query += " ORDER BY created_at DESC, id DESC"
 
-	rows, err := d.db.Query(query, args...)
+	rows, err := d.query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query request logs for export with filter: %w", err)
 	}
@@ -1208,9 +1482,9 @@ func (d *Database) GetStatusStats(filter *LogFilter) (*StatusStats, error) {
 		}
 		if filter.Stream != "" {
 			if filter.Stream == "true" {
-				conds = append(conds, "is_stream = 1")
+				conds = append(conds, "is_stream = TRUE")
 			} else if filter.Stream == "false" {
-				conds = append(conds, "is_stream = 0")
+				conds = append(conds, "is_stream = FALSE")
 			}
 		}
 		if filter.Status != "" {
@@ -1238,7 +1512,7 @@ func (d *Database) GetStatusStats(filter *LogFilter) (*StatusStats, error) {
 		query += " WHERE " + strings.Join(conds, " AND ")
 	}
 	var res StatusStats
-	if err := d.db.QueryRow(query, args...).Scan(&res.Success, &res.Error); err != nil {
+	if err := d.queryRow(query, args...).Scan(&res.Success, &res.Error); err != nil {
 		return nil, fmt.Errorf("failed to query status stats: %w", err)
 	}
 	return &res, nil
@@ -1267,9 +1541,9 @@ func (d *Database) GetTokensTimeline(filter *LogFilter) ([]*TimelinePoint, error
 		}
 		if filter.Stream != "" {
 			if filter.Stream == "true" {
-				conds = append(conds, "is_stream = 1")
+				conds = append(conds, "is_stream = TRUE")
 			} else if filter.Stream == "false" {
-				conds = append(conds, "is_stream = 0")
+				conds = append(conds, "is_stream = FALSE")
 			}
 		}
 		// 注意：不要用 Status 限制到 success-only，这里要返回 total 与 success 两条序列
@@ -1300,18 +1574,27 @@ func (d *Database) GetTokensTimeline(filter *LogFilter) ([]*TimelinePoint, error
 			bucket = "%Y-%m-%d %H:00"
 		}
 	}
+	bucketExpr := fmt.Sprintf("strftime('%s', created_at)", bucket)
+	if d.dialect == "postgres" {
+		if strings.Contains(bucket, "%H") {
+			bucketExpr = "to_char(date_trunc('hour', created_at), 'YYYY-MM-DD HH24:00')"
+		} else {
+			bucketExpr = "to_char(date_trunc('day', created_at), 'YYYY-MM-DD')"
+		}
+	}
+
 	query := fmt.Sprintf(`
  		SELECT
- 			strftime('%s', created_at) AS bucket_time,
+ 			%s AS bucket_time,
  			SUM(tokens_used) AS total_tokens,
  			SUM(CASE WHEN status_code = 200 THEN tokens_used ELSE 0 END) AS success_tokens
- 		FROM request_logs`, bucket)
+ 		FROM request_logs`, bucketExpr)
 	if len(conds) > 0 {
 		query += " WHERE " + strings.Join(conds, " AND ")
 	}
-	query += " GROUP BY bucket_time ORDER BY bucket_time ASC"
+	query += " GROUP BY 1 ORDER BY 1 ASC"
 
-	rows, err := d.db.Query(query, args...)
+	rows, err := d.query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query tokens timeline: %w", err)
 	}
@@ -1349,9 +1632,9 @@ func (d *Database) GetGroupTokensStats(filter *LogFilter) ([]*GroupTokensStat, e
 		}
 		if filter.Stream != "" {
 			if filter.Stream == "true" {
-				conds = append(conds, "is_stream = 1")
+				conds = append(conds, "is_stream = TRUE")
 			} else if filter.Stream == "false" {
-				conds = append(conds, "is_stream = 0")
+				conds = append(conds, "is_stream = FALSE")
 			}
 		}
 		if filter.Status != "" {
@@ -1381,7 +1664,7 @@ func (d *Database) GetGroupTokensStats(filter *LogFilter) ([]*GroupTokensStat, e
 	}
 	query += " GROUP BY grp ORDER BY total_tokens DESC"
 
-	rows, err := d.db.Query(query, args...)
+	rows, err := d.query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query group tokens stats: %w", err)
 	}

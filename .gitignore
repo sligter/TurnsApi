@@ -3,5 +3,5 @@
 /turnsapi
 /turnsapi.exe
 /turnsapi_amd64_x86
-/data/turnsapi.db
+/data/
 *.db

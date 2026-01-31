@@ -84,7 +84,7 @@ func NewMultiProviderServer(configManager *internal.ConfigManager, keyManager *k
 	gin.SetMode(ginMode)
 
 	// 创建请求日志记录器
-	requestLogger, err := logger.NewRequestLogger(config.Database.Path)
+	requestLogger, err := logger.NewRequestLoggerWithConfig(config.Database, config.RequestLogs)
 	if err != nil {
 		log.Fatalf("Failed to create request logger: %v", err)
 	}
@@ -1790,8 +1790,11 @@ func (s *MultiProviderServer) handleHealth(c *gin.Context) {
 // Start 启动服务器
 func (s *MultiProviderServer) Start() error {
 	s.httpServer = &http.Server{
-		Addr:    s.config.GetAddress(),
-		Handler: s.router,
+		Addr:              s.config.GetAddress(),
+		Handler:           s.router,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	log.Printf("Starting multi-provider server on %s", s.config.GetAddress())
@@ -2506,22 +2509,22 @@ func (s *MultiProviderServer) handleGroupsManage(c *gin.Context) {
 	allGroups := s.configManager.GetAllGroups()
 	for groupID, group := range allGroups {
 		groupInfo := map[string]interface{}{
-			"group_id":             groupID,
-			"group_name":           group.Name,
-			"provider_type":        group.ProviderType,
-			"base_url":             group.BaseURL,
-			"api_version":          group.APIVersion,
-			"enabled":              group.Enabled,
-			"timeout":              group.Timeout.Seconds(),
-			"max_retries":          group.MaxRetries,
-			"rotation_strategy":    group.RotationStrategy,
-			"api_keys":             group.APIKeys,
-			"models":               group.Models,
-			"headers":              group.Headers,
-			"request_params":       group.RequestParams,
-			"model_mappings":       group.ModelMappings,
-			"use_native_response":  group.UseNativeResponse,
-			"rpm_limit":            group.RPMLimit,
+			"group_id":              groupID,
+			"group_name":            group.Name,
+			"provider_type":         group.ProviderType,
+			"base_url":              group.BaseURL,
+			"api_version":           group.APIVersion,
+			"enabled":               group.Enabled,
+			"timeout":               group.Timeout.Seconds(),
+			"max_retries":           group.MaxRetries,
+			"rotation_strategy":     group.RotationStrategy,
+			"api_keys":              group.APIKeys,
+			"models":                group.Models,
+			"headers":               group.Headers,
+			"request_params":        group.RequestParams,
+			"model_mappings":        group.ModelMappings,
+			"use_native_response":   group.UseNativeResponse,
+			"rpm_limit":             group.RPMLimit,
 			"disable_permanent_ban": group.DisablePermanentBan,
 			"max_error_count":       group.MaxErrorCount,
 			"rate_limit_cooldown":   group.RateLimitCooldown,

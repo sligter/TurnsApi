@@ -5,15 +5,25 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/pkoukk/tiktoken-go"
+
+	"turnsapi/internal/storage"
 )
 
 // RequestLogger 请求日志记录器
 type RequestLogger struct {
 	db *Database
+
+	asyncEnabled  bool
+	writeCh       chan *RequestLog
+	batchSize     int
+	flushInterval time.Duration
+	wg            sync.WaitGroup
+	closeOnce     sync.Once
 }
 
 // NewRequestLogger 创建新的请求日志记录器
@@ -28,8 +38,49 @@ func NewRequestLogger(dbPath string) (*RequestLogger, error) {
 	}, nil
 }
 
+func NewRequestLoggerWithConfig(dbCfg storage.DatabaseConfig, logsCfg storage.RequestLogsConfig) (*RequestLogger, error) {
+	db, err := NewDatabaseWithConfig(dbCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database: %w", err)
+	}
+
+	r := &RequestLogger{db: db}
+
+	if logsCfg.Buffer <= 0 {
+		logsCfg.Buffer = 10000
+	}
+	if logsCfg.BatchSize <= 0 {
+		logsCfg.BatchSize = 200
+	}
+	if logsCfg.FlushInterval <= 0 {
+		logsCfg.FlushInterval = 200 * time.Millisecond
+	}
+
+	if logsCfg.AsyncWrite {
+		r.asyncEnabled = true
+		r.batchSize = logsCfg.BatchSize
+		r.flushInterval = logsCfg.FlushInterval
+		r.writeCh = make(chan *RequestLog, logsCfg.Buffer)
+		r.wg.Add(1)
+		go r.runWriter()
+	}
+
+	return r, nil
+}
+
 // Close 关闭日志记录器
 func (r *RequestLogger) Close() error {
+	if r == nil {
+		return nil
+	}
+
+	r.closeOnce.Do(func() {
+		if r.asyncEnabled && r.writeCh != nil {
+			close(r.writeCh)
+		}
+	})
+
+	r.wg.Wait()
 	return r.db.Close()
 }
 
@@ -86,6 +137,15 @@ func (r *RequestLogger) LogRequest(
 	}
 
 	// 插入数据库
+	if r.asyncEnabled && r.writeCh != nil {
+		select {
+		case r.writeCh <- requestLog:
+			return
+		default:
+			// channel is full - fall back to synchronous insert to avoid dropping logs
+		}
+	}
+
 	if insertErr := r.db.InsertRequestLog(requestLog); insertErr != nil {
 		log.Printf("Failed to insert request log: %v", insertErr)
 	}
@@ -99,6 +159,51 @@ func (r *RequestLogger) redactSecret(text, secret, replacement string) string {
 	text = strings.ReplaceAll(text, secret, replacement)
 	text = strings.ReplaceAll(text, "Bearer "+secret, "Bearer "+replacement)
 	return text
+}
+
+func (r *RequestLogger) runWriter() {
+	defer r.wg.Done()
+
+	if r.writeCh == nil {
+		return
+	}
+
+	ticker := time.NewTicker(r.flushInterval)
+	defer ticker.Stop()
+
+	batch := make([]*RequestLog, 0, r.batchSize)
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+
+		if err := r.db.InsertRequestLogsBatch(batch); err != nil {
+			log.Printf("Failed to batch insert request logs (len=%d): %v", len(batch), err)
+			for _, row := range batch {
+				if insertErr := r.db.InsertRequestLog(row); insertErr != nil {
+					log.Printf("Failed to insert request log (fallback): %v", insertErr)
+				}
+			}
+		}
+
+		batch = batch[:0]
+	}
+
+	for {
+		select {
+		case row, ok := <-r.writeCh:
+			if !ok {
+				flush()
+				return
+			}
+			batch = append(batch, row)
+			if len(batch) >= r.batchSize {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
+	}
 }
 
 // GetRequestLogs 获取请求日志列表

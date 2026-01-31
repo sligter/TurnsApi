@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -88,7 +90,7 @@ func NewMultiProviderProxyWithProxyKey(
 	}
 
 	// 初始化数据库连接
-	database, err := database.NewGroupsDB(config.Database.Path)
+	groupsDB, err := database.NewGroupsDBWithConfig(config.Database)
 	if err != nil {
 		log.Printf("Failed to initialize database for proxy: %v", err)
 	}
@@ -101,7 +103,7 @@ func NewMultiProviderProxyWithProxyKey(
 		providerRouter:  providerRouter,
 		requestLogger:   requestLogger,
 		rpmLimiter:      rpmLimiter,
-		database:        database,
+		database:        groupsDB,
 	}
 }
 
@@ -233,7 +235,34 @@ func (p *MultiProviderProxy) HandleChatCompletion(c *gin.Context) {
 			return
 		}
 	} else {
-		if err := c.ShouldBindJSON(&req); err != nil {
+		bodyBytes, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			log.Printf("Failed to read request body: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": gin.H{
+					"message": "Invalid request format",
+					"type":    "invalid_request_error",
+					"code":    "invalid_json",
+				},
+			})
+			return
+		}
+		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+		var raw map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+			log.Printf("Failed to parse request json: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": gin.H{
+					"message": "Invalid request format",
+					"type":    "invalid_request_error",
+					"code":    "invalid_json",
+				},
+			})
+			return
+		}
+
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
 			log.Printf("Failed to parse request: %v", err)
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": gin.H{
@@ -243,6 +272,33 @@ func (p *MultiProviderProxy) HandleChatCompletion(c *gin.Context) {
 				},
 			})
 			return
+		}
+
+		if len(raw) > 0 {
+			knownKeys := map[string]struct{}{
+				"model":               {},
+				"messages":            {},
+				"temperature":         {},
+				"max_tokens":          {},
+				"stream":              {},
+				"top_p":               {},
+				"stop":                {},
+				"tools":               {},
+				"tool_choice":         {},
+				"parallel_tool_calls": {},
+			}
+
+			extra := make(map[string]interface{})
+			for k, v := range raw {
+				if _, ok := knownKeys[k]; ok {
+					continue
+				}
+				extra[k] = v
+			}
+
+			if len(extra) > 0 {
+				req.Extra = extra
+			}
 		}
 	}
 
@@ -462,12 +518,21 @@ func (p *MultiProviderProxy) tryGroupRotationWithLimit(
 			// 更新提供商配置中的API密钥
 			p.providerRouter.UpdateProviderConfig(routeResult.ProviderConfig, apiKey)
 
-			// 尝试处理请求
+			// 尝试处理请求（按分组强制覆盖 request_params；每次尝试都使用独立副本，避免跨分组污染）
+			attemptReq := *req
+			if req.Extra != nil {
+				attemptReq.Extra = make(map[string]interface{}, len(req.Extra))
+				for k, v := range req.Extra {
+					attemptReq.Extra[k] = v
+				}
+			}
+			attemptReq.ApplyRequestParams(routeResult.ProviderConfig.RequestParams)
+
 			var success bool
-			if req.Stream {
-				success = p.handleStreamingRequest(c, req, routeResult, apiKey, startTime)
+			if attemptReq.Stream {
+				success = p.handleStreamingRequest(c, &attemptReq, routeResult, apiKey, startTime)
 			} else {
-				success = p.handleNonStreamingRequest(c, req, routeResult, apiKey, startTime)
+				success = p.handleNonStreamingRequest(c, &attemptReq, routeResult, apiKey, startTime)
 			}
 
 			if success {
@@ -561,12 +626,21 @@ func (p *MultiProviderProxy) tryGroupWithAllKeys(
 		// 更新提供商配置中的API密钥
 		p.providerRouter.UpdateProviderConfig(routeResult.ProviderConfig, apiKey)
 
-		// 尝试处理请求
+		// 尝试处理请求（按分组强制覆盖 request_params；每次尝试都使用独立副本，避免跨分组污染）
+		attemptReq := *req
+		if req.Extra != nil {
+			attemptReq.Extra = make(map[string]interface{}, len(req.Extra))
+			for k, v := range req.Extra {
+				attemptReq.Extra[k] = v
+			}
+		}
+		attemptReq.ApplyRequestParams(routeResult.ProviderConfig.RequestParams)
+
 		var success bool
-		if req.Stream {
-			success = p.handleStreamingRequest(c, req, routeResult, apiKey, startTime)
+		if attemptReq.Stream {
+			success = p.handleStreamingRequest(c, &attemptReq, routeResult, apiKey, startTime)
 		} else {
-			success = p.handleNonStreamingRequest(c, req, routeResult, apiKey, startTime)
+			success = p.handleNonStreamingRequest(c, &attemptReq, routeResult, apiKey, startTime)
 		}
 
 		if success {
@@ -588,7 +662,6 @@ func (p *MultiProviderProxy) tryGroupWithAllKeys(
 	log.Printf("分组 %s 内所有 %d 个密钥均已尝试，全部失败", routeResult.GroupID, len(sortedKeys))
 	return false
 }
-
 
 // sortKeysByPriority 按优先级排序密钥
 func (p *MultiProviderProxy) sortKeysByPriority(keyStatuses map[string]*keymanager.KeyStatus) []string {
@@ -702,9 +775,6 @@ func (p *MultiProviderProxy) handleNonStreamingRequest(
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	// 应用分组的请求参数覆盖
-	req.ApplyRequestParams(routeResult.ProviderConfig.RequestParams)
-
 	// 应用模型名称映射
 	originalModel := req.Model
 	req.Model = p.providerRouter.ResolveModelName(req.Model, routeResult.GroupID)
@@ -795,9 +865,6 @@ func (p *MultiProviderProxy) handleStreamingRequest(
 	// 创建带有长超时的context，避免流式请求超时
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
-
-	// 应用分组的请求参数覆盖
-	req.ApplyRequestParams(routeResult.ProviderConfig.RequestParams)
 
 	// 应用模型名称映射
 	originalModel := req.Model
@@ -937,12 +1004,12 @@ func (p *MultiProviderProxy) getProxyKeyInfo(c *gin.Context) (string, string) {
 			// 设置到上下文中以便后续使用
 			c.Set("proxy_key_name", proxyKey.Name)
 			c.Set("proxy_key_id", proxyKey.ID)
-			
+
 			// 更新代理密钥使用次数
 			if p.proxyKeyManager != nil {
 				p.proxyKeyManager.UpdateUsage(proxyKey.Key)
 			}
-			
+
 			return proxyKey.Name, proxyKey.ID
 		}
 	}

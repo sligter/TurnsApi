@@ -3,7 +3,10 @@ package internal
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
+
+	"turnsapi/internal/storage"
 
 	"gopkg.in/yaml.v2"
 )
@@ -13,7 +16,7 @@ type UserGroup struct {
 	Name              string                 `yaml:"name"`
 	ProviderType      string                 `yaml:"provider_type"`
 	BaseURL           string                 `yaml:"base_url"`
-	APIVersion        string                 `yaml:"api_version,omitempty"`         // API版本（用于Azure OpenAI等）
+	APIVersion        string                 `yaml:"api_version,omitempty"` // API版本（用于Azure OpenAI等）
 	Enabled           bool                   `yaml:"enabled"`
 	Timeout           time.Duration          `yaml:"timeout"`
 	MaxRetries        int                    `yaml:"max_retries"`
@@ -89,10 +92,8 @@ type Config struct {
 		MaxAge     int    `yaml:"max_age"`
 	} `yaml:"logging"`
 
-	Database struct {
-		Path          string `yaml:"path"`
-		RetentionDays int    `yaml:"retention_days"`
-	} `yaml:"database"`
+	Database    storage.DatabaseConfig    `yaml:"database"`
+	RequestLogs storage.RequestLogsConfig `yaml:"request_logs"`
 }
 
 // LoadConfig 从文件加载配置
@@ -132,11 +133,37 @@ func LoadConfig(configPath string) (*Config, error) {
 	if config.Auth.SessionTimeout == 0 {
 		config.Auth.SessionTimeout = 24 * time.Hour
 	}
-	if config.Database.Path == "" {
+	if config.Database.Driver == "" {
+		config.Database.Driver = "sqlite"
+	}
+	driver := strings.ToLower(strings.TrimSpace(config.Database.Driver))
+	if driver == "" {
+		driver = "sqlite"
+		config.Database.Driver = driver
+	}
+	if (driver == "sqlite" || driver == "sqlite3") && config.Database.Path == "" {
 		config.Database.Path = "data/turnsapi.db"
+	}
+	if config.Database.MaxOpenConns == 0 {
+		config.Database.MaxOpenConns = 50
+	}
+	if config.Database.MaxIdleConns == 0 {
+		config.Database.MaxIdleConns = 10
+	}
+	if config.Database.ConnMaxLifetime == 0 {
+		config.Database.ConnMaxLifetime = time.Hour
 	}
 	if config.Database.RetentionDays == 0 {
 		config.Database.RetentionDays = 30
+	}
+	if config.RequestLogs.Buffer == 0 {
+		config.RequestLogs.Buffer = 10000
+	}
+	if config.RequestLogs.BatchSize == 0 {
+		config.RequestLogs.BatchSize = 200
+	}
+	if config.RequestLogs.FlushInterval == 0 {
+		config.RequestLogs.FlushInterval = 200 * time.Millisecond
 	}
 
 	// 设置全局设置默认值
@@ -269,22 +296,41 @@ func (c *Config) GetGroupByID(groupID string) (*UserGroup, bool) {
 
 // GetGroupByModel 根据模型名称获取匹配的用户分组
 func (c *Config) GetGroupByModel(modelName string) (*UserGroup, string) {
+	var bestMatch *UserGroup
+	bestMatchID := ""
+	var fallback *UserGroup
+	fallbackID := ""
+
 	for groupID, group := range c.UserGroups {
 		if !group.Enabled {
 			continue
 		}
 
-		// 如果分组没有指定模型列表，则认为支持所有模型
+		// If a group has no model list, treat it as "supports all models" (fallback only).
 		if len(group.Models) == 0 {
-			return group, groupID
+			if fallback == nil || groupID < fallbackID {
+				fallback = group
+				fallbackID = groupID
+			}
+			continue
 		}
 
-		// 检查模型是否在分组的模型列表中
 		for _, model := range group.Models {
 			if model == modelName {
-				return group, groupID
+				if bestMatch == nil || groupID < bestMatchID {
+					bestMatch = group
+					bestMatchID = groupID
+				}
+				break
 			}
 		}
+	}
+
+	if bestMatch != nil {
+		return bestMatch, bestMatchID
+	}
+	if fallback != nil {
+		return fallback, fallbackID
 	}
 	return nil, ""
 }

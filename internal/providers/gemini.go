@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"turnsapi/internal/netutil"
+
 	"google.golang.org/genai"
 )
 
@@ -311,7 +313,7 @@ func (p *GeminiProvider) ChatCompletionStream(ctx context.Context, req *ChatComp
 							return
 						}
 					}
-					
+
 					// 处理工具调用
 					if part.FunctionCall != nil {
 						toolCallData := p.convertGeminiFunctionCallToOpenAI(part.FunctionCall, responseID, created, req.Model)
@@ -398,8 +400,8 @@ func (p *GeminiProvider) ChatCompletionStreamNative(ctx context.Context, req *Ch
 	// 启用思考模式 - 对于Gemini 2.5系列模型启用思考功能
 	// 原生格式保留思考内容
 	genConfig.ThinkingConfig = &genai.ThinkingConfig{
-		IncludeThoughts: true,  // 原生格式包含思考内容
-		ThinkingBudget:  nil,   // 使用默认的动态思考预算
+		IncludeThoughts: true, // 原生格式包含思考内容
+		ThinkingBudget:  nil,  // 使用默认的动态思考预算
 	}
 
 	streamChan := make(chan StreamResponse, 10)
@@ -539,9 +541,7 @@ func (p *GeminiProvider) fetchModelsFromAPI(ctx context.Context) ([]map[string]i
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
+	client := netutil.NewClient(10 * time.Second)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -980,7 +980,7 @@ func (p *GeminiProvider) convertGenaiToOpenAIResponse(result *genai.GenerateCont
 
 	// 提取文本内容，过滤掉思考内容
 	content := p.extractNonThoughtContent(result)
-	
+
 	// 提取工具调用
 	toolCalls := p.extractToolCalls(result)
 
@@ -989,7 +989,7 @@ func (p *GeminiProvider) convertGenaiToOpenAIResponse(result *genai.GenerateCont
 		Role:    "assistant",
 		Content: content,
 	}
-	
+
 	// 如果有工具调用，添加到消息中
 	if len(toolCalls) > 0 {
 		message.ToolCalls = toolCalls
@@ -1027,7 +1027,7 @@ func (p *GeminiProvider) convertGenaiToOpenAIResponse(result *genai.GenerateCont
 // extractNonThoughtContent 从Gemini响应中提取非思考内容
 func (p *GeminiProvider) extractNonThoughtContent(result *genai.GenerateContentResponse) string {
 	var content strings.Builder
-	
+
 	// 遍历所有候选响应
 	for _, candidate := range result.Candidates {
 		if candidate.Content != nil {
@@ -1040,7 +1040,7 @@ func (p *GeminiProvider) extractNonThoughtContent(result *genai.GenerateContentR
 			}
 		}
 	}
-	
+
 	return content.String()
 }
 
@@ -1178,7 +1178,7 @@ func (p *GeminiProvider) convertGeminiChunkToSSE(chunk *genai.GenerateContentRes
 // convertAssistantMessageWithToolCalls 转换包含工具调用的助手消息
 func (p *GeminiProvider) convertAssistantMessageWithToolCalls(msg ChatMessage) ([]*genai.Part, error) {
 	var parts []*genai.Part
-	
+
 	// 如果有文本内容，先添加文本部分
 	if msg.Content != nil {
 		textParts, err := p.convertMessageContentToParts(msg.Content)
@@ -1187,52 +1187,52 @@ func (p *GeminiProvider) convertAssistantMessageWithToolCalls(msg ChatMessage) (
 		}
 		parts = append(parts, textParts...)
 	}
-	
+
 	// 添加工具调用信息作为文本描述
 	// 注意：Gemini不直接支持OpenAI格式的工具调用，我们将其转换为文本描述
 	for _, toolCall := range msg.ToolCalls {
 		toolCallText := fmt.Sprintf("Tool call: %s(%s)", toolCall.Function.Name, toolCall.Function.Arguments)
 		parts = append(parts, genai.NewPartFromText(toolCallText))
 	}
-	
+
 	// 如果没有任何内容，添加一个空文本part
 	if len(parts) == 0 {
 		parts = append(parts, genai.NewPartFromText(""))
 	}
-	
+
 	return parts, nil
 }
 
 // convertToolMessageToParts 转换工具消息为Parts
 func (p *GeminiProvider) convertToolMessageToParts(msg ChatMessage) ([]*genai.Part, error) {
 	var parts []*genai.Part
-	
+
 	// 工具消息转换为用户消息，包含工具执行结果
 	toolResultText := fmt.Sprintf("Tool result for call %s: %v", msg.ToolCallID, msg.Content)
 	parts = append(parts, genai.NewPartFromText(toolResultText))
-	
+
 	return parts, nil
 }
 
 // convertToolsToGeminiFormat 转换OpenAI格式的工具定义为Gemini格式
 func (p *GeminiProvider) convertToolsToGeminiFormat(tools []Tool) ([]*genai.Tool, error) {
 	var geminiTools []*genai.Tool
-	
+
 	for _, tool := range tools {
 		if tool.Type != "function" {
 			continue // Gemini只支持函数工具
 		}
-		
+
 		if tool.Function == nil {
 			continue
 		}
-		
+
 		// 创建Gemini函数声明
 		funcDecl := &genai.FunctionDeclaration{
 			Name:        tool.Function.Name,
 			Description: tool.Function.Description,
 		}
-		
+
 		// 转换参数schema
 		if tool.Function.Parameters != nil {
 			// 将map[string]interface{}转换为genai.Schema
@@ -1242,15 +1242,15 @@ func (p *GeminiProvider) convertToolsToGeminiFormat(tools []Tool) ([]*genai.Tool
 			}
 			funcDecl.Parameters = schema
 		}
-		
+
 		// 创建Gemini工具
 		geminiTool := &genai.Tool{
 			FunctionDeclarations: []*genai.FunctionDeclaration{funcDecl},
 		}
-		
+
 		geminiTools = append(geminiTools, geminiTool)
 	}
-	
+
 	return geminiTools, nil
 }
 
@@ -1258,24 +1258,24 @@ func (p *GeminiProvider) convertToolsToGeminiFormat(tools []Tool) ([]*genai.Tool
 func (p *GeminiProvider) convertGeminiFunctionCallToOpenAI(funcCall *genai.FunctionCall, responseID string, created int64, model string) string {
 	// 生成工具调用ID
 	toolCallID := fmt.Sprintf("call_%d", time.Now().UnixNano())
-	
+
 	// 转换参数为JSON字符串
 	argsBytes, _ := json.Marshal(funcCall.Args)
 	argsStr := string(argsBytes)
-	
+
 	// 创建OpenAI格式的工具调用流式数据
 	toolCallData := fmt.Sprintf(`data: {"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":{"tool_calls":[{"id":"%s","type":"function","function":{"name":"%s","arguments":"%s"}}]},"finish_reason":null}]}
 
 `,
 		responseID, created, model, toolCallID, funcCall.Name, escapeJSONString(argsStr))
-	
+
 	return toolCallData
 }
 
 // extractToolCalls 从Gemini响应中提取工具调用
 func (p *GeminiProvider) extractToolCalls(result *genai.GenerateContentResponse) []ToolCall {
 	var toolCalls []ToolCall
-	
+
 	// 遍历所有候选响应
 	for _, candidate := range result.Candidates {
 		if candidate.Content != nil {
@@ -1284,14 +1284,14 @@ func (p *GeminiProvider) extractToolCalls(result *genai.GenerateContentResponse)
 				if part.FunctionCall != nil {
 					// 生成工具调用ID
 					toolCallID := fmt.Sprintf("call_%d", time.Now().UnixNano())
-					
+
 					// 转换参数为JSON字符串
 					argsBytes, err := json.Marshal(part.FunctionCall.Args)
 					if err != nil {
 						// 如果序列化失败，使用空对象
 						argsBytes = []byte("{}")
 					}
-					
+
 					toolCall := ToolCall{
 						ID:   toolCallID,
 						Type: "function",
@@ -1300,12 +1300,12 @@ func (p *GeminiProvider) extractToolCalls(result *genai.GenerateContentResponse)
 							Arguments: string(argsBytes),
 						},
 					}
-					
+
 					toolCalls = append(toolCalls, toolCall)
 				}
 			}
 		}
 	}
-	
+
 	return toolCalls
 }
