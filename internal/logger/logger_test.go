@@ -1,7 +1,9 @@
 package logger
 
 import (
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -11,7 +13,7 @@ func TestExtractToolCallInfo(t *testing.T) {
 	// 创建临时数据库用于测试
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test.db")
-	
+
 	logger, err := NewRequestLogger(dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create request logger: %v", err)
@@ -195,15 +197,15 @@ data: [DONE]`,
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			hasTools, count, toolNames := logger.extractToolCallInfo(tt.requestBody, tt.responseBody)
-			
+
 			if hasTools != tt.expectHasTools {
 				t.Errorf("Expected hasTools %v, got %v", tt.expectHasTools, hasTools)
 			}
-			
+
 			if count != tt.expectCount {
 				t.Errorf("Expected count %d, got %d", tt.expectCount, count)
 			}
-			
+
 			if toolNames != tt.expectToolNames {
 				t.Errorf("Expected toolNames '%s', got '%s'", tt.expectToolNames, toolNames)
 			}
@@ -216,7 +218,7 @@ func TestLogRequestWithToolCalls(t *testing.T) {
 	// 创建临时数据库用于测试
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test.db")
-	
+
 	logger, err := NewRequestLogger(dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create request logger: %v", err)
@@ -237,7 +239,7 @@ func TestLogRequestWithToolCalls(t *testing.T) {
 			}
 		]
 	}`
-	
+
 	responseBody := `{
 		"choices": [{
 			"message": {
@@ -299,7 +301,7 @@ func TestExtractToolCallsFromStream(t *testing.T) {
 	// 创建临时数据库用于测试
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test.db")
-	
+
 	logger, err := NewRequestLogger(dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create request logger: %v", err)
@@ -358,15 +360,15 @@ data: [DONE]`,
 		t.Run(tt.name, func(t *testing.T) {
 			var toolNames []string
 			count := logger.extractToolCallsFromStream(tt.streamBody, &toolNames)
-			
+
 			if count != tt.expectCount {
 				t.Errorf("Expected count %d, got %d", tt.expectCount, count)
 			}
-			
+
 			if len(toolNames) != len(tt.expectNames) {
 				t.Errorf("Expected %d tool names, got %d", len(tt.expectNames), len(toolNames))
 			}
-			
+
 			for i, expectedName := range tt.expectNames {
 				if i >= len(toolNames) || toolNames[i] != expectedName {
 					t.Errorf("Expected tool name[%d] '%s', got '%s'", i, expectedName, toolNames[i])
@@ -381,7 +383,7 @@ func TestDatabaseToolCallFields(t *testing.T) {
 	// 创建临时数据库用于测试
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test.db")
-	
+
 	db, err := NewDatabase(dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
@@ -439,7 +441,7 @@ func TestRequestLogSummaryWithToolCalls(t *testing.T) {
 	// 创建临时数据库用于测试
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test.db")
-	
+
 	logger, err := NewRequestLogger(dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create request logger: %v", err)
@@ -461,9 +463,37 @@ func TestRequestLogSummaryWithToolCalls(t *testing.T) {
 	for _, tc := range testCases {
 		requestBody := `{"model": "gpt-3.5-turbo", "messages": []}`
 		responseBody := `{"choices": []}`
-		
+
 		if tc.hasTools {
-			requestBody = `{"model": "gpt-3.5-turbo", "messages": [], "tools": [{"type": "function", "function": {"name": "test"}}]}`
+			toolNames := strings.Split(tc.toolNames, ",")
+			toolsParts := make([]string, 0, tc.toolsCount)
+			toolCallsParts := make([]string, 0, tc.toolsCount)
+			for i := 0; i < tc.toolsCount; i++ {
+				name := fmt.Sprintf("tool_%d", i)
+				if i < len(toolNames) && toolNames[i] != "" {
+					name = toolNames[i]
+				}
+				toolsParts = append(
+					toolsParts,
+					fmt.Sprintf(`{"type":"function","function":{"name":"%s"}}`, name),
+				)
+				toolCallsParts = append(
+					toolCallsParts,
+					fmt.Sprintf(
+						`{"id":"call_%d","type":"function","function":{"name":"%s","arguments":"{}"}}`,
+						i,
+						name,
+					),
+				)
+			}
+			requestBody = fmt.Sprintf(
+				`{"model":"gpt-3.5-turbo","messages":[],"tools":[%s]}`,
+				strings.Join(toolsParts, ","),
+			)
+			responseBody = fmt.Sprintf(
+				`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[%s]}}]}`,
+				strings.Join(toolCallsParts, ","),
+			)
 		}
 
 		logger.LogRequest(
@@ -488,15 +518,15 @@ func TestRequestLogSummaryWithToolCalls(t *testing.T) {
 		// 注意：日志是按创建时间倒序返回的，所以需要反向索引
 		expectedIndex := len(testCases) - 1 - idx
 		expected := testCases[expectedIndex]
-		
+
 		if log.HasToolCalls != expected.hasTools {
 			t.Errorf("Log %d: Expected HasToolCalls %v, got %v", idx, expected.hasTools, log.HasToolCalls)
 		}
-		
+
 		if log.ToolCallsCount != expected.toolsCount {
 			t.Errorf("Log %d: Expected ToolCallsCount %d, got %d", idx, expected.toolsCount, log.ToolCallsCount)
 		}
-		
+
 		if log.ToolNames != expected.toolNames {
 			t.Errorf("Log %d: Expected ToolNames '%s', got '%s'", idx, expected.toolNames, log.ToolNames)
 		}

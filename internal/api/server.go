@@ -8,8 +8,8 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"time"
 	"strings"
+	"time"
 
 	"turnsapi/internal"
 	"turnsapi/internal/auth"
@@ -274,7 +274,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 	}
 
 	// 设置cookie
-	c.SetCookie("auth_token", session.Token, int(s.config.Auth.SessionTimeout.Seconds()), "/", "", false, true)
+	s.authManager.SetAuthCookie(c, session.Token)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -291,7 +291,7 @@ func (s *Server) handleLogout(c *gin.Context) {
 	}
 
 	// 清除cookie
-	c.SetCookie("auth_token", "", -1, "/", "", false, true)
+	s.authManager.ClearAuthCookie(c)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -872,15 +872,20 @@ func (s *Server) parseLogFilterWithRange(c *gin.Context) *logger.LogFilter {
 	var end *time.Time
 	switch strings.ToLower(strings.TrimSpace(rangeStr)) {
 	case "1h":
-		st := now.Add(-1 * time.Hour); start, end = &st, &now
+		st := now.Add(-1 * time.Hour)
+		start, end = &st, &now
 	case "6h":
-		st := now.Add(-6 * time.Hour); start, end = &st, &now
+		st := now.Add(-6 * time.Hour)
+		start, end = &st, &now
 	case "24h":
-		st := now.Add(-24 * time.Hour); start, end = &st, &now
+		st := now.Add(-24 * time.Hour)
+		start, end = &st, &now
 	case "7d":
-		st := now.AddDate(0, 0, -7); start, end = &st, &now
+		st := now.AddDate(0, 0, -7)
+		start, end = &st, &now
 	case "30d":
-		st := now.AddDate(0, 0, -30); start, end = &st, &now
+		st := now.AddDate(0, 0, -30)
+		start, end = &st, &now
 	}
 	// 显式起止时间（优先于range）
 	parseTime := func(s string) *time.Time {
@@ -910,7 +915,7 @@ func (s *Server) parseLogFilterWithRange(c *gin.Context) *logger.LogFilter {
 	f.EndTime = end
 	return f
 }
- 
+
 func (s *Server) handleModelStats(c *gin.Context) {
 	if s.requestLogger == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
@@ -922,7 +927,7 @@ func (s *Server) handleModelStats(c *gin.Context) {
 
 	// 解析筛选条件和时间范围
 	filter := s.parseLogFilterWithRange(c)
-	
+
 	// 获取模型统计（支持筛选）
 	stats, err := s.requestLogger.GetModelStatsWithFilter(filter)
 	if err != nil {
@@ -960,10 +965,10 @@ func (s *Server) handleStatusDistribution(c *gin.Context) {
 		},
 	})
 }
- 
+
 func (s *Server) handleTokensTimeline(c *gin.Context) {
 	if s.requestLogger == nil {
-	c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "error": "Request logger not available"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "error": "Request logger not available"})
 		return
 	}
 	filter := s.parseLogFilterWithRange(c)
@@ -977,7 +982,7 @@ func (s *Server) handleTokensTimeline(c *gin.Context) {
 		"data":    points,
 	})
 }
- 
+
 func (s *Server) handleGroupTokens(c *gin.Context) {
 	if s.requestLogger == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "error": "Request logger not available"})
@@ -994,7 +999,7 @@ func (s *Server) handleGroupTokens(c *gin.Context) {
 		"data":    stats,
 	})
 }
- 
+
 func (s *Server) handleTotalTokensStats(c *gin.Context) {
 	if s.requestLogger == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{

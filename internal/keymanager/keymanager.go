@@ -27,6 +27,9 @@ type KeyStatus struct {
 	LastValidated   *time.Time `json:"last_validated,omitempty"` // 最后验证时间
 	UsageCount      int64      `json:"usage_count"`
 	ErrorCount      int64      `json:"error_count"`
+	RateLimitCount  int64      `json:"rate_limit_count"`            // 限流次数（当天）
+	RateLimitUntil  time.Time  `json:"rate_limit_until,omitempty"`  // 限流冷却截止时间
+	LastRateLimitAt time.Time  `json:"last_rate_limit_at,omitempty"` // 最后一次限流时间
 	LastError       string     `json:"last_error,omitempty"`
 	LastErrorTime   time.Time  `json:"last_error_time,omitempty"`
 	ValidationError string     `json:"validation_error,omitempty"` // 验证错误信息

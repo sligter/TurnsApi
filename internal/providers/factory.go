@@ -26,8 +26,8 @@ func (f *DefaultProviderFactory) CreateProvider(config *ProviderConfig) (Provide
 	case "anthropic":
 		return NewAnthropicProvider(config), nil
 	case "azure_openai":
-		// Azure OpenAI使用OpenAI格式，但可能需要特殊处理
-		return NewOpenAIProvider(config), nil
+		// Azure OpenAI 使用专用的 Azure 提供商，处理特殊的认证和 URL 格式
+		return NewAzureOpenAIProvider(config), nil
 	default:
 		return nil, fmt.Errorf("unsupported provider type: %s", config.ProviderType)
 	}

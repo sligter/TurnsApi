@@ -23,34 +23,71 @@ type DuplicateKeyInfo struct {
 
 // GroupKeyManager 分组密钥管理器
 type GroupKeyManager struct {
-	groupID          string
-	groupName        string
-	keys             []string
-	keyInfos         map[string]*KeyInfo
-	keyStatuses      map[string]*KeyStatus
-	rotationStrategy string
-	currentIndex     int
-	mutex            sync.RWMutex
+	groupID             string
+	groupName           string
+	keys                []string
+	keyInfos            map[string]*KeyInfo
+	keyStatuses         map[string]*KeyStatus
+	rotationStrategy    string
+	currentIndex        int
+	mutex               sync.RWMutex
+	// 密钥管理策略配置
+	disablePermanentBan bool // 禁用永久禁用策略
+	maxErrorCount       int  // 触发禁用的最大错误次数
+	rateLimitCooldown   int  // 自定义限流冷却时间（秒）
 }
 
-// NewGroupKeyManager 创建分组密钥管理器
+// GroupKeyManagerConfig 分组密钥管理器配置
+type GroupKeyManagerConfig struct {
+	GroupID             string
+	GroupName           string
+	Keys                []string
+	RotationStrategy    string
+	DisablePermanentBan bool
+	MaxErrorCount       int
+	RateLimitCooldown   int
+}
+
+// NewGroupKeyManager 创建分组密钥管理器（保持向后兼容）
 func NewGroupKeyManager(groupID, groupName string, keys []string, rotationStrategy string) *GroupKeyManager {
+	return NewGroupKeyManagerWithConfig(GroupKeyManagerConfig{
+		GroupID:             groupID,
+		GroupName:           groupName,
+		Keys:                keys,
+		RotationStrategy:    rotationStrategy,
+		DisablePermanentBan: false,
+		MaxErrorCount:       10,
+		RateLimitCooldown:   0, // 使用默认渐进策略
+	})
+}
+
+// NewGroupKeyManagerWithConfig 使用配置创建分组密钥管理器
+func NewGroupKeyManagerWithConfig(config GroupKeyManagerConfig) *GroupKeyManager {
+	// 设置默认值
+	maxErrorCount := config.MaxErrorCount
+	if maxErrorCount <= 0 {
+		maxErrorCount = 10
+	}
+
 	gkm := &GroupKeyManager{
-		groupID:          groupID,
-		groupName:        groupName,
-		keys:             keys,
-		keyInfos:         make(map[string]*KeyInfo),
-		keyStatuses:      make(map[string]*KeyStatus),
-		rotationStrategy: rotationStrategy,
-		currentIndex:     0,
+		groupID:             config.GroupID,
+		groupName:           config.GroupName,
+		keys:                config.Keys,
+		keyInfos:            make(map[string]*KeyInfo),
+		keyStatuses:         make(map[string]*KeyStatus),
+		rotationStrategy:    config.RotationStrategy,
+		currentIndex:        0,
+		disablePermanentBan: config.DisablePermanentBan,
+		maxErrorCount:       maxErrorCount,
+		rateLimitCooldown:   config.RateLimitCooldown,
 	}
 
 	// 初始化密钥信息和状态
-	for _, key := range keys {
+	for _, key := range config.Keys {
 		gkm.keyInfos[key] = &KeyInfo{
 			Key:           key,
-			Name:          fmt.Sprintf("%s-Key-%s", groupName, getSafeKeySuffix(key)),
-			Description:   fmt.Sprintf("密钥来自分组: %s", groupName),
+			Name:          fmt.Sprintf("%s-Key-%s", config.GroupName, getSafeKeySuffix(key)),
+			Description:   fmt.Sprintf("密钥来自分组: %s", config.GroupName),
 			IsActive:      true,
 			AllowedModels: []string{},
 		}
@@ -101,11 +138,16 @@ func (gkm *GroupKeyManager) GetNextKey() (string, error) {
 	return selectedKey, nil
 }
 
-// getActiveKeys 获取所有活跃的密钥
+// getActiveKeys 获取所有活跃的密钥（排除在限流冷却期内的密钥）
 func (gkm *GroupKeyManager) getActiveKeys() []string {
 	var activeKeys []string
+	now := time.Now()
 	for _, key := range gkm.keys {
 		if status, exists := gkm.keyStatuses[key]; exists && status.IsActive {
+			// 检查是否在限流冷却期内
+			if !status.RateLimitUntil.IsZero() && now.Before(status.RateLimitUntil) {
+				continue // 跳过在限流冷却期内的密钥
+			}
 			activeKeys = append(activeKeys, key)
 		}
 	}
@@ -173,9 +215,21 @@ func (gkm *GroupKeyManager) ReportSuccess(apiKey string) {
 
 	if status, exists := gkm.keyStatuses[apiKey]; exists {
 		status.LastUsed = time.Now()
-		// 成功使用不增加错误计数，但可以重置连续错误状态
+		// 成功使用后重置错误计数，让密钥可以继续正常使用
 		if status.ErrorCount > 0 {
-			log.Printf("密钥 %s (分组: %s) 恢复正常", gkm.maskKey(apiKey), gkm.groupID)
+			log.Printf("密钥 %s (分组: %s) 恢复正常，重置错误计数（之前: %d）", gkm.maskKey(apiKey), gkm.groupID, status.ErrorCount)
+			status.ErrorCount = 0
+			status.LastError = ""
+		}
+		// 成功使用后清除限流冷却时间（但保留限流计数，用于优先级排序）
+		if !status.RateLimitUntil.IsZero() {
+			log.Printf("密钥 %s (分组: %s) 限流冷却已解除", gkm.maskKey(apiKey), gkm.groupID)
+			status.RateLimitUntil = time.Time{}
+		}
+		// 如果密钥之前被禁用，成功后恢复活跃状态
+		if !status.IsActive {
+			status.IsActive = true
+			log.Printf("密钥 %s (分组: %s) 已重新激活", gkm.maskKey(apiKey), gkm.groupID)
 		}
 	}
 }
@@ -186,18 +240,159 @@ func (gkm *GroupKeyManager) ReportError(apiKey string, errorMsg string) {
 	defer gkm.mutex.Unlock()
 
 	if status, exists := gkm.keyStatuses[apiKey]; exists {
-		status.ErrorCount++
 		status.LastError = errorMsg
 		status.LastErrorTime = time.Now()
 
-		log.Printf("密钥 %s (分组: %s) 发生错误: %s (错误次数: %d)",
-			gkm.maskKey(apiKey), gkm.groupID, errorMsg, status.ErrorCount)
+		// 判断是否为限流错误
+		isRateLimit := isRateLimitError(errorMsg)
 
-		// 如果错误次数过多，可以考虑暂时禁用密钥
-		if status.ErrorCount >= 15 {
-			status.IsActive = false
-			log.Printf("密钥 %s (分组: %s) 因错误过多被暂时禁用", gkm.maskKey(apiKey), gkm.groupID)
+		if isRateLimit {
+			// 限流错误：增加限流计数，设置冷却时间
+			status.RateLimitCount++
+			status.LastRateLimitAt = time.Now()
+
+			// 计算冷却时间
+			var cooldownDuration time.Duration
+			if gkm.rateLimitCooldown > 0 {
+				// 使用自定义冷却时间
+				cooldownDuration = time.Duration(gkm.rateLimitCooldown) * time.Second
+			} else {
+				// 使用渐进策略：第1次：1分钟，第2次：5分钟，第3次：15分钟，之后：1小时
+				switch {
+				case status.RateLimitCount <= 1:
+					cooldownDuration = 1 * time.Minute
+				case status.RateLimitCount <= 2:
+					cooldownDuration = 5 * time.Minute
+				case status.RateLimitCount <= 3:
+					cooldownDuration = 15 * time.Minute
+				default:
+					cooldownDuration = 1 * time.Hour
+				}
+			}
+			status.RateLimitUntil = time.Now().Add(cooldownDuration)
+
+			log.Printf("密钥 %s (分组: %s) 被限流，冷却 %v（限流次数: %d）",
+				gkm.maskKey(apiKey), gkm.groupID, cooldownDuration, status.RateLimitCount)
+
+			// 限流不禁用密钥，只是暂时跳过
+		} else {
+			// 其他错误：增加错误计数
+			status.ErrorCount++
+
+			log.Printf("密钥 %s (分组: %s) 发生错误: %s (错误次数: %d/%d)",
+				gkm.maskKey(apiKey), gkm.groupID, errorMsg, status.ErrorCount, gkm.maxErrorCount)
+
+			// 根据配置决定是否禁用密钥
+			if !gkm.disablePermanentBan && status.ErrorCount >= int64(gkm.maxErrorCount) {
+				status.IsActive = false
+				log.Printf("密钥 %s (分组: %s) 因连续错误过多被禁用（已达到阈值 %d）",
+					gkm.maskKey(apiKey), gkm.groupID, gkm.maxErrorCount)
+			} else if gkm.disablePermanentBan {
+				log.Printf("密钥 %s (分组: %s) 永久禁用策略已关闭，密钥保持活跃",
+					gkm.maskKey(apiKey), gkm.groupID)
+			}
 		}
+	}
+}
+
+// ReportRateLimit 专门报告限流错误
+func (gkm *GroupKeyManager) ReportRateLimit(apiKey string, retryAfterSeconds int) {
+	gkm.mutex.Lock()
+	defer gkm.mutex.Unlock()
+
+	if status, exists := gkm.keyStatuses[apiKey]; exists {
+		status.RateLimitCount++
+		status.LastRateLimitAt = time.Now()
+		status.LastError = "rate_limit"
+		status.LastErrorTime = time.Now()
+
+		// 如果API返回了重试时间，使用它；否则使用默认策略
+		var cooldownDuration time.Duration
+		if retryAfterSeconds > 0 {
+			cooldownDuration = time.Duration(retryAfterSeconds) * time.Second
+		} else {
+			// 默认冷却策略
+			switch {
+			case status.RateLimitCount <= 1:
+				cooldownDuration = 1 * time.Minute
+			case status.RateLimitCount <= 2:
+				cooldownDuration = 5 * time.Minute
+			case status.RateLimitCount <= 3:
+				cooldownDuration = 15 * time.Minute
+			default:
+				cooldownDuration = 1 * time.Hour
+			}
+		}
+		status.RateLimitUntil = time.Now().Add(cooldownDuration)
+
+		log.Printf("密钥 %s (分组: %s) 被限流，冷却 %v（限流次数: %d）",
+			gkm.maskKey(apiKey), gkm.groupID, cooldownDuration, status.RateLimitCount)
+	}
+}
+
+// isRateLimitError 判断错误消息是否为限流错误
+func isRateLimitError(errorMsg string) bool {
+	lowerMsg := strings.ToLower(errorMsg)
+	rateLimitKeywords := []string{
+		"rate limit",
+		"rate_limit",
+		"ratelimit",
+		"too many requests",
+		"429",
+		"quota exceeded",
+		"quota_exceeded",
+		"requests per minute",
+		"rpm limit",
+		"tokens per minute",
+		"tpm limit",
+	}
+	for _, keyword := range rateLimitKeywords {
+		if strings.Contains(lowerMsg, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsKeyAvailable 检查密钥是否可用（考虑限流冷却）
+func (gkm *GroupKeyManager) IsKeyAvailable(apiKey string) bool {
+	gkm.mutex.RLock()
+	defer gkm.mutex.RUnlock()
+
+	status, exists := gkm.keyStatuses[apiKey]
+	if !exists {
+		return false
+	}
+
+	// 检查是否被禁用
+	if !status.IsActive {
+		return false
+	}
+
+	// 检查是否在限流冷却期内
+	if !status.RateLimitUntil.IsZero() && time.Now().Before(status.RateLimitUntil) {
+		return false
+	}
+
+	return true
+}
+
+// ResetDailyRateLimits 重置当天的限流计数（应在每天凌晨调用）
+func (gkm *GroupKeyManager) ResetDailyRateLimits() {
+	gkm.mutex.Lock()
+	defer gkm.mutex.Unlock()
+
+	resetCount := 0
+	for _, status := range gkm.keyStatuses {
+		if status.RateLimitCount > 0 {
+			status.RateLimitCount = 0
+			status.RateLimitUntil = time.Time{}
+			resetCount++
+		}
+	}
+
+	if resetCount > 0 {
+		log.Printf("分组 %s 已重置 %d 个密钥的限流计数", gkm.groupID, resetCount)
 	}
 }
 
@@ -289,7 +484,15 @@ func NewMultiGroupKeyManagerWithDB(config *internal.Config, db *database.GroupsD
 	// 初始化所有分组的密钥管理器
 	for groupID, group := range config.UserGroups {
 		if group.Enabled && len(group.APIKeys) > 0 {
-			groupManager := NewGroupKeyManager(groupID, group.Name, group.APIKeys, group.RotationStrategy)
+			groupManager := NewGroupKeyManagerWithConfig(GroupKeyManagerConfig{
+				GroupID:             groupID,
+				GroupName:           group.Name,
+				Keys:                group.APIKeys,
+				RotationStrategy:    group.RotationStrategy,
+				DisablePermanentBan: group.DisablePermanentBan,
+				MaxErrorCount:       group.MaxErrorCount,
+				RateLimitCooldown:   group.RateLimitCooldown,
+			})
 
 			// 如果有数据库连接，从数据库加载密钥验证状态
 			if db != nil {
@@ -300,7 +503,56 @@ func NewMultiGroupKeyManagerWithDB(config *internal.Config, db *database.GroupsD
 		}
 	}
 
+	// 启动定时重置限流计数的后台任务
+	go mgkm.startRateLimitResetScheduler()
+
 	return mgkm
+}
+
+// startRateLimitResetScheduler 启动限流计数定时重置任务
+func (mgkm *MultiGroupKeyManager) startRateLimitResetScheduler() {
+	// 计算距离下一个凌晨的时间
+	now := time.Now()
+	nextMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+	durationUntilMidnight := nextMidnight.Sub(now)
+
+	log.Printf("限流计数重置任务已启动，将在 %v 后首次执行（%s）", durationUntilMidnight, nextMidnight.Format("2006-01-02 15:04:05"))
+
+	// 首次等待到凌晨
+	select {
+	case <-time.After(durationUntilMidnight):
+		mgkm.resetAllDailyRateLimits()
+	case <-mgkm.ctx.Done():
+		return
+	}
+
+	// 之后每24小时执行一次
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			mgkm.resetAllDailyRateLimits()
+		case <-mgkm.ctx.Done():
+			return
+		}
+	}
+}
+
+// resetAllDailyRateLimits 重置所有分组的每日限流计数
+func (mgkm *MultiGroupKeyManager) resetAllDailyRateLimits() {
+	mgkm.mutex.RLock()
+	defer mgkm.mutex.RUnlock()
+
+	log.Printf("开始每日限流计数重置...")
+
+	for groupID, groupManager := range mgkm.groupManagers {
+		groupManager.ResetDailyRateLimits()
+		log.Printf("已重置分组 %s 的限流计数", groupID)
+	}
+
+	log.Printf("每日限流计数重置完成")
 }
 
 // GetNextKeyForGroup 获取指定分组的下一个可用密钥
@@ -396,7 +648,15 @@ func (mgkm *MultiGroupKeyManager) UpdateGroupConfig(groupID string, group *inter
 		log.Printf("删除分组 %s 的密钥管理器", groupID)
 	} else if group.Enabled && len(group.APIKeys) > 0 {
 		// 创建或更新分组管理器
-		groupManager := NewGroupKeyManager(groupID, group.Name, group.APIKeys, group.RotationStrategy)
+		groupManager := NewGroupKeyManagerWithConfig(GroupKeyManagerConfig{
+			GroupID:             groupID,
+			GroupName:           group.Name,
+			Keys:                group.APIKeys,
+			RotationStrategy:    group.RotationStrategy,
+			DisablePermanentBan: group.DisablePermanentBan,
+			MaxErrorCount:       group.MaxErrorCount,
+			RateLimitCooldown:   group.RateLimitCooldown,
+		})
 		mgkm.groupManagers[groupID] = groupManager
 		log.Printf("更新分组 %s 的密钥管理器", groupID)
 	} else {

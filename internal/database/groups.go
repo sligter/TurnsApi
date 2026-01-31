@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -33,11 +35,46 @@ type GroupsDB struct {
 	db *sql.DB
 }
 
+func configureSQLite(db *sql.DB) error {
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON;`); err != nil {
+		return fmt.Errorf("failed to enable foreign_keys: %w", err)
+	}
+
+	if _, err := db.Exec(`PRAGMA busy_timeout = 5000;`); err != nil {
+		return fmt.Errorf("failed to set busy_timeout: %w", err)
+	}
+
+	var journalMode string
+	if err := db.QueryRow(`PRAGMA journal_mode = WAL;`).Scan(&journalMode); err != nil {
+		return fmt.Errorf("failed to enable WAL journal_mode: %w", err)
+	}
+
+	if _, err := db.Exec(`PRAGMA synchronous = NORMAL;`); err != nil {
+		return fmt.Errorf("failed to set synchronous: %w", err)
+	}
+
+	return nil
+}
+
 // NewGroupsDB 创建新的分组数据库管理器
 func NewGroupsDB(dbPath string) (*GroupsDB, error) {
+	dir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create database directory: %w", err)
+	}
+
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(time.Hour)
+
+	if err := configureSQLite(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 
 	groupsDB := &GroupsDB{db: db}

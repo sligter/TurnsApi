@@ -1368,6 +1368,26 @@
                                         <p class="text-xs text-gray-500 mt-1">
                                             API服务的基础URL地址
                                         </p>
+                                        <p class="text-xs text-blue-500 mt-1" x-show="groupFormData.provider_type === 'azure_openai'">
+                                            Azure格式: https://{resource}.openai.azure.com/openai/deployments/{deployment-name}
+                                        </p>
+                                    </div>
+
+                                    <!-- Azure OpenAI API Version -->
+                                    <div x-show="groupFormData.provider_type === 'azure_openai'" x-cloak>
+                                        <label
+                                            class="block text-sm font-medium text-gray-700 mb-2"
+                                            >API Version *</label
+                                        >
+                                        <input
+                                            type="text"
+                                            x-model="groupFormData.api_version"
+                                            class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                            placeholder="如: 2024-02-15-preview"
+                                        />
+                                        <p class="text-xs text-gray-500 mt-1">
+                                            Azure OpenAI API 版本
+                                        </p>
                                     </div>
 
                                     <div class="md:col-span-2">
@@ -1650,6 +1670,86 @@
                                                 </p>
                                             </div>
                                         </label>
+                                    </div>
+                                </div>
+
+                                <!-- 密钥管理策略 -->
+                                <div>
+                                    <h5
+                                        class="text-sm font-medium text-gray-800 mb-4 flex items-center"
+                                    >
+                                        <svg
+                                            class="w-4 h-4 mr-2 text-orange-500"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            viewBox="0 0 24 24"
+                                        >
+                                            <path
+                                                stroke-linecap="round"
+                                                stroke-linejoin="round"
+                                                stroke-width="2"
+                                                d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
+                                            ></path>
+                                        </svg>
+                                        密钥管理策略
+                                    </h5>
+                                    <div
+                                        class="bg-white rounded-lg p-4 border border-gray-200 shadow-sm space-y-4"
+                                    >
+                                        <label
+                                            class="flex items-start space-x-3 cursor-pointer"
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                x-model="groupFormData.disable_permanent_ban"
+                                                class="mt-1 rounded border-gray-300 text-orange-600 shadow-sm focus:border-orange-300 focus:ring focus:ring-orange-200 focus:ring-opacity-50"
+                                            />
+                                            <div>
+                                                <span
+                                                    class="text-sm font-medium text-gray-700"
+                                                    >禁用永久禁用策略</span
+                                                >
+                                                <p
+                                                    class="text-xs text-gray-500 mt-1"
+                                                >
+                                                    勾选后密钥达到错误上限不会被永久禁用，只会进入临时冷却期
+                                                </p>
+                                            </div>
+                                        </label>
+                                        <div class="grid grid-cols-2 gap-4">
+                                            <div>
+                                                <label
+                                                    class="block text-sm font-medium text-gray-700 mb-2"
+                                                    >最大错误次数</label
+                                                >
+                                                <input
+                                                    type="number"
+                                                    x-model="groupFormData.max_error_count"
+                                                    min="1"
+                                                    class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                                                    placeholder="10"
+                                                />
+                                                <p class="text-xs text-gray-500 mt-1">
+                                                    密钥连续错误多少次后触发禁用（默认10次）
+                                                </p>
+                                            </div>
+                                            <div>
+                                                <label
+                                                    class="block text-sm font-medium text-gray-700 mb-2"
+                                                    >限流冷却时间（秒）</label
+                                                >
+                                                <input
+                                                    type="number"
+                                                    x-model="groupFormData.rate_limit_cooldown"
+                                                    min="0"
+                                                    class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                                                    placeholder="0"
+                                                />
+                                                <p class="text-xs text-gray-500 mt-1">
+                                                    限流时的冷却时间，0表示使用渐进策略（1分钟→1小时）
+                                                </p>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -4222,6 +4322,7 @@
                         name: "",
                         provider_type: "",
                         base_url: "",
+                        api_version: "",
                         enabled: true,
                         timeout: 30,
                         max_retries: 3,
@@ -4231,6 +4332,9 @@
                         use_native_response: false,
                         rpm_limit: 0,
                         headers: {}, // HTTP headers
+                        disable_permanent_ban: false,
+                        max_error_count: 10,
+                        rate_limit_cooldown: 0,
                     },
                     modelsText: "",
 
@@ -4802,6 +4906,14 @@
                             [groupId]: true
                         };
 
+                        // 定义清除验证状态的辅助函数
+                        const clearValidatingState = () => {
+                            this.validatingGroups = {
+                                ...this.validatingGroups,
+                                [groupId]: false
+                            };
+                        };
+
                         try {
                             // 获取分组的完整数据
                             const response = await fetch(
@@ -4820,6 +4932,7 @@
                                 groupData.api_keys.length === 0
                             ) {
                                 alert("该分组没有配置API密钥");
+                                clearValidatingState();
                                 return;
                             }
 
@@ -4830,6 +4943,7 @@
 
                             if (validKeys.length === 0) {
                                 alert("该分组没有有效的API密钥");
+                                clearValidatingState();
                                 return;
                             }
 
@@ -4886,9 +5000,18 @@
 
                                 alert(message);
 
-                                // 刷新提供商状态和密钥状态
-                                await this.loadProviderStatuses();
-                                await this.refreshKeyStatus();
+                                // 刷新提供商状态和密钥状态（在后台执行，不阻塞状态更新）
+                                setTimeout(async () => {
+                                    try {
+                                        await this.loadProviderStatuses();
+                                        await this.refreshKeyStatus();
+                                    } catch (refreshError) {
+                                        console.error(
+                                            "刷新状态失败:",
+                                            refreshError
+                                        );
+                                    }
+                                }, 0);
                             } else {
                                 throw new Error(result.message || "验证失败");
                             }
@@ -4897,10 +5020,7 @@
                             alert(`验证分组密钥失败：${error.message}`);
                         } finally {
                             // 清除验证状态 - 使用对象展开确保响应式更新
-                            this.validatingGroups = {
-                                ...this.validatingGroups,
-                                [groupId]: false
-                            };
+                            clearValidatingState();
                         }
                     },
 
@@ -5069,6 +5189,7 @@
                                 provider_type:
                                     fullGroupData.provider_type || "",
                                 base_url: fullGroupData.base_url || "",
+                                api_version: fullGroupData.api_version || "",
                                 enabled: fullGroupData.enabled !== false,
                                 timeout: parseInt(fullGroupData.timeout) || 30,
                                 max_retries:
@@ -5084,6 +5205,13 @@
                                 rpm_limit:
                                     parseInt(fullGroupData.rpm_limit) || 0,
                                 headers: fullGroupData.headers || {},
+                                disable_permanent_ban: Boolean(
+                                    fullGroupData.disable_permanent_ban,
+                                ),
+                                max_error_count:
+                                    parseInt(fullGroupData.max_error_count) || 10,
+                                rate_limit_cooldown:
+                                    parseInt(fullGroupData.rate_limit_cooldown) || 0,
                             };
 
                             this.modelsText = (fullGroupData.models || []).join(
@@ -5364,6 +5492,8 @@
                                                         .provider_type,
                                                 base_url:
                                                     this.groupFormData.base_url,
+                                                api_version:
+                                                    this.groupFormData.api_version,
                                                 models: this.groupFormData
                                                     .models,
                                                 model_mappings:
@@ -5458,6 +5588,7 @@
                             name: "",
                             provider_type: "",
                             base_url: "",
+                            api_version: "",
                             enabled: true,
                             timeout: 30,
                             max_retries: 3,
@@ -5467,6 +5598,9 @@
                             use_native_response: false,
                             rpm_limit: 0,
                             headers: {},
+                            disable_permanent_ban: false,
+                            max_error_count: 10,
+                            rate_limit_cooldown: 0,
                         };
                         this.modelsText = "";
                         this.selectedKeys = [];
@@ -5505,7 +5639,7 @@
                             anthropic: "https://api.anthropic.com",
                             gemini: "https://generativelanguage.googleapis.com",
                             azure_openai:
-                                "https://your-resource-name.openai.azure.com",
+                                "https://your-resource.openai.azure.com/openai/deployments/your-deployment-name",
                             openrouter: "https://openrouter.ai/api/v1",
                         };
 
@@ -5522,6 +5656,16 @@
                                 this.groupFormData.base_url =
                                     defaultBaseUrls[providerType];
                             }
+                        }
+
+                        // 为 Azure OpenAI 设置默认 API 版本
+                        if (providerType === "azure_openai") {
+                            if (!this.groupFormData.api_version) {
+                                this.groupFormData.api_version = "2024-02-15-preview";
+                            }
+                        } else {
+                            // 非 Azure OpenAI 时清空 api_version
+                            this.groupFormData.api_version = "";
                         }
                     },
 

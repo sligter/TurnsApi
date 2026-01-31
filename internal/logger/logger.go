@@ -55,12 +55,16 @@ func (r *RequestLogger) LogRequest(
 	// 提取工具调用信息
 	hasToolCalls, toolCallsCount, toolNames := r.extractToolCallInfo(requestBody, responseBody)
 
+	maskedKey := r.maskAPIKey(openRouterKey)
+	requestBody = r.redactSecret(requestBody, openRouterKey, maskedKey)
+	responseBody = r.redactSecret(responseBody, openRouterKey, maskedKey)
+
 	// 创建日志记录
 	requestLog := &RequestLog{
 		ProxyKeyName:    proxyKeyName,
 		ProxyKeyID:      proxyKeyID,
 		ProviderGroup:   providerGroup,
-		OpenRouterKey:   r.maskAPIKey(openRouterKey),
+		OpenRouterKey:   maskedKey,
 		Model:           model,
 		RequestBody:     requestBody,
 		ResponseBody:    responseBody,
@@ -85,6 +89,16 @@ func (r *RequestLogger) LogRequest(
 	if insertErr := r.db.InsertRequestLog(requestLog); insertErr != nil {
 		log.Printf("Failed to insert request log: %v", insertErr)
 	}
+}
+
+func (r *RequestLogger) redactSecret(text, secret, replacement string) string {
+	if text == "" || secret == "" || replacement == "" {
+		return text
+	}
+
+	text = strings.ReplaceAll(text, secret, replacement)
+	text = strings.ReplaceAll(text, "Bearer "+secret, "Bearer "+replacement)
+	return text
 }
 
 // GetRequestLogs 获取请求日志列表
@@ -756,8 +770,8 @@ func GetClientIP(c *gin.Context) string {
 
 // extractToolCallInfo 从请求和响应中提取工具调用信息
 func (r *RequestLogger) extractToolCallInfo(requestBody, responseBody string) (bool, int, string) {
-	hasToolCalls := false
-	toolCallsCount := 0
+	requestHasTools := false
+	toolCallsCountFromResponse := 0
 	var toolNames []string
 
 	// 从请求中检查是否包含工具定义
@@ -766,11 +780,14 @@ func (r *RequestLogger) extractToolCallInfo(requestBody, responseBody string) (b
 		if err := json.Unmarshal([]byte(requestBody), &request); err == nil {
 			// 检查tools字段
 			if tools, ok := request["tools"].([]interface{}); ok && len(tools) > 0 {
-				hasToolCalls = true
+				requestHasTools = true
 				for _, tool := range tools {
 					if toolMap, ok := tool.(map[string]interface{}); ok {
 						if function, ok := toolMap["function"].(map[string]interface{}); ok {
 							if name, ok := function["name"].(string); ok {
+								if name == "" {
+									continue
+								}
 								toolNames = append(toolNames, name)
 							}
 						}
@@ -790,13 +807,15 @@ func (r *RequestLogger) extractToolCallInfo(requestBody, responseBody string) (b
 					if choiceMap, ok := choice.(map[string]interface{}); ok {
 						if message, ok := choiceMap["message"].(map[string]interface{}); ok {
 							if toolCalls, ok := message["tool_calls"].([]interface{}); ok {
-								toolCallsCount += len(toolCalls)
-								hasToolCalls = true
+								toolCallsCountFromResponse += len(toolCalls)
 								// 提取实际调用的工具名称
 								for _, toolCall := range toolCalls {
 									if tcMap, ok := toolCall.(map[string]interface{}); ok {
 										if function, ok := tcMap["function"].(map[string]interface{}); ok {
 											if name, ok := function["name"].(string); ok {
+												if name == "" {
+													continue
+												}
 												// 避免重复添加工具名称
 												found := false
 												for _, existingName := range toolNames {
@@ -819,18 +838,23 @@ func (r *RequestLogger) extractToolCallInfo(requestBody, responseBody string) (b
 			}
 		} else {
 			// 尝试解析流式响应
-			toolCallsCount += r.extractToolCallsFromStream(responseBody, &toolNames)
-			if toolCallsCount > 0 {
-				hasToolCalls = true
-			}
+			toolCallsCountFromResponse += r.extractToolCallsFromStream(
+				responseBody,
+				&toolNames,
+			)
 		}
 	}
+
+	hasToolCalls := requestHasTools || toolCallsCountFromResponse > 0
+	toolCallsCount := toolCallsCountFromResponse
 
 	// 将工具名称列表转换为逗号分隔的字符串
 	toolNamesStr := strings.Join(toolNames, ",")
 
-	if hasToolCalls {
+	if toolCallsCount > 0 {
 		log.Printf("Detected tool calls: count=%d, tools=%s", toolCallsCount, toolNamesStr)
+	} else if requestHasTools && toolNamesStr != "" {
+		log.Printf("Detected tools definition: tools=%s", toolNamesStr)
 	}
 
 	return hasToolCalls, toolCallsCount, toolNamesStr

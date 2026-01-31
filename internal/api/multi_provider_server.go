@@ -2506,21 +2506,25 @@ func (s *MultiProviderServer) handleGroupsManage(c *gin.Context) {
 	allGroups := s.configManager.GetAllGroups()
 	for groupID, group := range allGroups {
 		groupInfo := map[string]interface{}{
-			"group_id":            groupID,
-			"group_name":          group.Name,
-			"provider_type":       group.ProviderType,
-			"base_url":            group.BaseURL,
-			"enabled":             group.Enabled,
-			"timeout":             group.Timeout.Seconds(),
-			"max_retries":         group.MaxRetries,
-			"rotation_strategy":   group.RotationStrategy,
-			"api_keys":            group.APIKeys,
-			"models":              group.Models,
-			"headers":             group.Headers,
-			"request_params":      group.RequestParams,
-			"model_mappings":      group.ModelMappings,
-			"use_native_response": group.UseNativeResponse,
-			"rpm_limit":           group.RPMLimit,
+			"group_id":             groupID,
+			"group_name":           group.Name,
+			"provider_type":        group.ProviderType,
+			"base_url":             group.BaseURL,
+			"api_version":          group.APIVersion,
+			"enabled":              group.Enabled,
+			"timeout":              group.Timeout.Seconds(),
+			"max_retries":          group.MaxRetries,
+			"rotation_strategy":    group.RotationStrategy,
+			"api_keys":             group.APIKeys,
+			"models":               group.Models,
+			"headers":              group.Headers,
+			"request_params":       group.RequestParams,
+			"model_mappings":       group.ModelMappings,
+			"use_native_response":  group.UseNativeResponse,
+			"rpm_limit":            group.RPMLimit,
+			"disable_permanent_ban": group.DisablePermanentBan,
+			"max_error_count":       group.MaxErrorCount,
+			"rate_limit_cooldown":   group.RateLimitCooldown,
 		}
 
 		// 获取健康状态，如果没有健康检查记录则默认为健康
@@ -2547,21 +2551,25 @@ func (s *MultiProviderServer) handleGroupsManage(c *gin.Context) {
 // handleCreateGroup 处理创建分组
 func (s *MultiProviderServer) handleCreateGroup(c *gin.Context) {
 	var req struct {
-		GroupID           string                 `json:"group_id" binding:"required"`
-		Name              string                 `json:"name" binding:"required"`
-		ProviderType      string                 `json:"provider_type" binding:"required"`
-		BaseURL           string                 `json:"base_url" binding:"required"`
-		Enabled           bool                   `json:"enabled"`
-		Timeout           float64                `json:"timeout"`
-		MaxRetries        int                    `json:"max_retries"`
-		RotationStrategy  string                 `json:"rotation_strategy"`
-		APIKeys           []string               `json:"api_keys"`
-		Models            []string               `json:"models"`
-		Headers           map[string]string      `json:"headers"`
-		RequestParams     map[string]interface{} `json:"request_params"`
-		ModelMappings     map[string]string      `json:"model_mappings"`
-		UseNativeResponse bool                   `json:"use_native_response"`
-		RPMLimit          int                    `json:"rpm_limit"`
+		GroupID             string                 `json:"group_id" binding:"required"`
+		Name                string                 `json:"name" binding:"required"`
+		ProviderType        string                 `json:"provider_type" binding:"required"`
+		BaseURL             string                 `json:"base_url" binding:"required"`
+		APIVersion          string                 `json:"api_version"`
+		Enabled             bool                   `json:"enabled"`
+		Timeout             float64                `json:"timeout"`
+		MaxRetries          int                    `json:"max_retries"`
+		RotationStrategy    string                 `json:"rotation_strategy"`
+		APIKeys             []string               `json:"api_keys"`
+		Models              []string               `json:"models"`
+		Headers             map[string]string      `json:"headers"`
+		RequestParams       map[string]interface{} `json:"request_params"`
+		ModelMappings       map[string]string      `json:"model_mappings"`
+		UseNativeResponse   bool                   `json:"use_native_response"`
+		RPMLimit            int                    `json:"rpm_limit"`
+		DisablePermanentBan bool                   `json:"disable_permanent_ban"`
+		MaxErrorCount       int                    `json:"max_error_count"`
+		RateLimitCooldown   int                    `json:"rate_limit_cooldown"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -2624,20 +2632,24 @@ func (s *MultiProviderServer) handleCreateGroup(c *gin.Context) {
 
 	// 创建新的用户分组，直接使用提供的密钥（前端已去重）
 	newGroup := &internal.UserGroup{
-		Name:              req.Name,
-		ProviderType:      req.ProviderType,
-		BaseURL:           req.BaseURL,
-		Enabled:           req.Enabled,
-		Timeout:           time.Duration(req.Timeout) * time.Second,
-		MaxRetries:        req.MaxRetries,
-		RotationStrategy:  req.RotationStrategy,
-		APIKeys:           req.APIKeys, // 直接使用前端提供的密钥
-		Models:            req.Models,
-		Headers:           req.Headers,
-		RequestParams:     req.RequestParams,
-		ModelMappings:     req.ModelMappings,
-		UseNativeResponse: req.UseNativeResponse,
-		RPMLimit:          req.RPMLimit,
+		Name:                req.Name,
+		ProviderType:        req.ProviderType,
+		BaseURL:             req.BaseURL,
+		APIVersion:          req.APIVersion,
+		Enabled:             req.Enabled,
+		Timeout:             time.Duration(req.Timeout) * time.Second,
+		MaxRetries:          req.MaxRetries,
+		RotationStrategy:    req.RotationStrategy,
+		APIKeys:             req.APIKeys, // 直接使用前端提供的密钥
+		Models:              req.Models,
+		Headers:             req.Headers,
+		RequestParams:       req.RequestParams,
+		ModelMappings:       req.ModelMappings,
+		UseNativeResponse:   req.UseNativeResponse,
+		RPMLimit:            req.RPMLimit,
+		DisablePermanentBan: req.DisablePermanentBan,
+		MaxErrorCount:       req.MaxErrorCount,
+		RateLimitCooldown:   req.RateLimitCooldown,
 	}
 
 	// 保存到配置管理器（会同时更新数据库和内存）
@@ -2683,20 +2695,24 @@ func (s *MultiProviderServer) handleUpdateGroup(c *gin.Context) {
 	}
 
 	var req struct {
-		Name              string                 `json:"name"`
-		ProviderType      string                 `json:"provider_type"`
-		BaseURL           string                 `json:"base_url"`
-		Enabled           *bool                  `json:"enabled"`
-		Timeout           *float64               `json:"timeout"`
-		MaxRetries        *int                   `json:"max_retries"`
-		RotationStrategy  string                 `json:"rotation_strategy"`
-		APIKeys           []string               `json:"api_keys"`
-		Models            []string               `json:"models"`
-		Headers           map[string]string      `json:"headers"`
-		RequestParams     map[string]interface{} `json:"request_params"`
-		ModelMappings     map[string]string      `json:"model_mappings"`
-		UseNativeResponse *bool                  `json:"use_native_response"`
-		RPMLimit          *int                   `json:"rpm_limit"`
+		Name                string                 `json:"name"`
+		ProviderType        string                 `json:"provider_type"`
+		BaseURL             string                 `json:"base_url"`
+		APIVersion          string                 `json:"api_version"`
+		Enabled             *bool                  `json:"enabled"`
+		Timeout             *float64               `json:"timeout"`
+		MaxRetries          *int                   `json:"max_retries"`
+		RotationStrategy    string                 `json:"rotation_strategy"`
+		APIKeys             []string               `json:"api_keys"`
+		Models              []string               `json:"models"`
+		Headers             map[string]string      `json:"headers"`
+		RequestParams       map[string]interface{} `json:"request_params"`
+		ModelMappings       map[string]string      `json:"model_mappings"`
+		UseNativeResponse   *bool                  `json:"use_native_response"`
+		RPMLimit            *int                   `json:"rpm_limit"`
+		DisablePermanentBan *bool                  `json:"disable_permanent_ban"`
+		MaxErrorCount       *int                   `json:"max_error_count"`
+		RateLimitCooldown   *int                   `json:"rate_limit_cooldown"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -2734,6 +2750,8 @@ func (s *MultiProviderServer) handleUpdateGroup(c *gin.Context) {
 	if req.BaseURL != "" {
 		existingGroup.BaseURL = req.BaseURL
 	}
+	// api_version 可以是空字符串（对于非 Azure 提供商），所以总是更新它
+	existingGroup.APIVersion = req.APIVersion
 	if req.Enabled != nil {
 		existingGroup.Enabled = *req.Enabled
 	}
@@ -2766,6 +2784,15 @@ func (s *MultiProviderServer) handleUpdateGroup(c *gin.Context) {
 	}
 	if req.RPMLimit != nil {
 		existingGroup.RPMLimit = *req.RPMLimit
+	}
+	if req.DisablePermanentBan != nil {
+		existingGroup.DisablePermanentBan = *req.DisablePermanentBan
+	}
+	if req.MaxErrorCount != nil {
+		existingGroup.MaxErrorCount = *req.MaxErrorCount
+	}
+	if req.RateLimitCooldown != nil {
+		existingGroup.RateLimitCooldown = *req.RateLimitCooldown
 	}
 
 	// 保存到配置管理器

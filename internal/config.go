@@ -13,6 +13,7 @@ type UserGroup struct {
 	Name              string                 `yaml:"name"`
 	ProviderType      string                 `yaml:"provider_type"`
 	BaseURL           string                 `yaml:"base_url"`
+	APIVersion        string                 `yaml:"api_version,omitempty"`         // API版本（用于Azure OpenAI等）
 	Enabled           bool                   `yaml:"enabled"`
 	Timeout           time.Duration          `yaml:"timeout"`
 	MaxRetries        int                    `yaml:"max_retries"`
@@ -24,6 +25,10 @@ type UserGroup struct {
 	ModelMappings     map[string]string      `yaml:"model_mappings,omitempty"`      // 模型名称映射：别名 -> 原始模型名
 	UseNativeResponse bool                   `yaml:"use_native_response,omitempty"` // 是否使用原生接口响应格式
 	RPMLimit          int                    `yaml:"rpm_limit,omitempty"`           // 每分钟请求数限制
+	// 密钥管理策略
+	DisablePermanentBan bool `yaml:"disable_permanent_ban,omitempty"` // 禁用永久禁用策略（默认false，即启用永久禁用）
+	MaxErrorCount       int  `yaml:"max_error_count,omitempty"`       // 触发禁用的最大错误次数（默认10）
+	RateLimitCooldown   int  `yaml:"rate_limit_cooldown,omitempty"`   // 限流冷却时间（秒，默认使用渐进策略）
 }
 
 // GlobalSettings 全局设置
@@ -224,6 +229,13 @@ func LoadConfig(configPath string) (*Config, error) {
 			// Anthropic版本现在在提供商内部处理
 			if group.Headers["anthropic-version"] == "" {
 				group.Headers["anthropic-version"] = "2023-06-01"
+			}
+		case "azure_openai":
+			// 将 api_version 传递到 Headers 中供 Azure 提供商使用
+			if group.APIVersion != "" {
+				group.Headers["api-version"] = group.APIVersion
+			} else if group.Headers["api-version"] == "" {
+				group.Headers["api-version"] = "2024-02-15-preview"
 			}
 		}
 

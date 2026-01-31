@@ -2,6 +2,7 @@ package router
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -299,7 +300,7 @@ func (pr *ProviderRouter) GetGroupsForModel(modelName string, allowedGroups []st
 	return pr.sortGroupsByFailureCount(modelName, candidateGroups)
 }
 
-// getAccessibleGroups 获取有权限访问的分组列表
+// getAccessibleGroups 获取有权限访问的分组列表（按分组ID排序保证一致性）
 func (pr *ProviderRouter) getAccessibleGroups(allowedGroups []string) []string {
 	var accessibleGroups []string
 
@@ -310,10 +311,12 @@ func (pr *ProviderRouter) getAccessibleGroups(allowedGroups []string) []string {
 				accessibleGroups = append(accessibleGroups, groupID)
 			}
 		}
+		// 排序保证一致的分组顺序，用于分组间轮换
+		sort.Strings(accessibleGroups)
 		return accessibleGroups
 	}
 
-	// 否则只返回允许访问的分组
+	// 否则只返回允许访问的分组（保持allowedGroups的顺序）
 	for _, groupID := range allowedGroups {
 		if group, exists := pr.config.UserGroups[groupID]; exists && group.Enabled {
 			accessibleGroups = append(accessibleGroups, groupID)

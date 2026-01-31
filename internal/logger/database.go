@@ -32,10 +32,14 @@ func NewDatabase(dbPath string) (*Database, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// 设置连接池参数
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(time.Hour)
+
+	if err := configureSQLite(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 
 	database := &Database{db: db}
 
@@ -52,6 +56,23 @@ func NewDatabase(dbPath string) (*Database, error) {
 	}
 
 	return database, nil
+}
+
+func configureSQLite(db *sql.DB) error {
+	if _, err := db.Exec(`PRAGMA busy_timeout = 5000;`); err != nil {
+		return fmt.Errorf("failed to set busy_timeout: %w", err)
+	}
+
+	var journalMode string
+	if err := db.QueryRow(`PRAGMA journal_mode = WAL;`).Scan(&journalMode); err != nil {
+		return fmt.Errorf("failed to enable WAL journal_mode: %w", err)
+	}
+
+	if _, err := db.Exec(`PRAGMA synchronous = NORMAL;`); err != nil {
+		return fmt.Errorf("failed to set synchronous: %w", err)
+	}
+
+	return nil
 }
 
 // Close 关闭数据库连接
@@ -387,7 +408,7 @@ func (d *Database) GetRequestLogs(proxyKeyName, providerGroup string, limit, off
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+	query += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
 
 	rows, err := d.db.Query(query, args...)
@@ -463,7 +484,7 @@ func (d *Database) GetRequestLogsWithFilter(filter *LogFilter) ([]*RequestLogSum
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+	query += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
 	args = append(args, filter.Limit, filter.Offset)
 
 	rows, err := d.db.Query(query, args...)
@@ -649,10 +670,10 @@ func (d *Database) GetModelStatsWithFilter(filter *LogFilter) ([]*ModelStats, er
 		conds []string
 		args  []interface{}
 	)
-	
+
 	// 基础条件：只统计成功的请求
 	conds = append(conds, "status_code = 200")
-	
+
 	if filter != nil {
 		if filter.ProxyKeyName != "" {
 			conds = append(conds, "proxy_key_name = ?")
@@ -682,7 +703,7 @@ func (d *Database) GetModelStatsWithFilter(filter *LogFilter) ([]*ModelStats, er
 			args = append(args, filter.EndTime.Format("2006-01-02 15:04:05"))
 		}
 	}
-	
+
 	query := `
 	SELECT
 		model,
@@ -690,11 +711,11 @@ func (d *Database) GetModelStatsWithFilter(filter *LogFilter) ([]*ModelStats, er
 		SUM(tokens_used) as total_tokens,
 		AVG(duration) as avg_duration
 	FROM request_logs`
-	
+
 	if len(conds) > 0 {
 		query += " WHERE " + strings.Join(conds, " AND ")
 	}
-	
+
 	query += " GROUP BY model ORDER BY total_requests DESC"
 
 	rows, err := d.db.Query(query, args...)
@@ -1065,7 +1086,7 @@ func (d *Database) GetAllRequestLogsForExport(proxyKeyName, providerGroup string
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	query += " ORDER BY created_at DESC"
+	query += " ORDER BY created_at DESC, id DESC"
 
 	rows, err := d.db.Query(query, args...)
 	if err != nil {
@@ -1140,7 +1161,7 @@ func (d *Database) GetAllRequestLogsForExportWithFilter(filter *LogFilter) ([]*R
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	query += " ORDER BY created_at DESC"
+	query += " ORDER BY created_at DESC, id DESC"
 
 	rows, err := d.db.Query(query, args...)
 	if err != nil {
@@ -1166,216 +1187,216 @@ func (d *Database) GetAllRequestLogsForExportWithFilter(filter *LogFilter) ([]*R
 	return logs, nil
 }
 
- // GetStatusStats 基于筛选与时间范围的状态分布聚合
- func (d *Database) GetStatusStats(filter *LogFilter) (*StatusStats, error) {
- 	var (
- 		conds []string
- 		args  []interface{}
- 	)
- 	if filter != nil {
- 		if filter.ProxyKeyName != "" {
- 			conds = append(conds, "proxy_key_name = ?")
- 			args = append(args, filter.ProxyKeyName)
- 		}
- 		if filter.ProviderGroup != "" {
- 			conds = append(conds, "provider_group = ?")
- 			args = append(args, filter.ProviderGroup)
- 		}
- 		if filter.Model != "" {
- 			conds = append(conds, "model = ?")
- 			args = append(args, filter.Model)
- 		}
- 		if filter.Stream != "" {
- 			if filter.Stream == "true" {
- 				conds = append(conds, "is_stream = 1")
- 			} else if filter.Stream == "false" {
- 				conds = append(conds, "is_stream = 0")
- 			}
- 		}
- 		if filter.Status != "" {
- 			if filter.Status == "200" {
- 				conds = append(conds, "status_code = 200")
- 			} else if filter.Status == "error" {
- 				conds = append(conds, "status_code != 200")
- 			}
- 		}
- 		if filter.StartTime != nil {
- 			conds = append(conds, "created_at >= ?")
- 			args = append(args, filter.StartTime.Format("2006-01-02 15:04:05"))
- 		}
- 		if filter.EndTime != nil {
- 			conds = append(conds, "created_at <= ?")
- 			args = append(args, filter.EndTime.Format("2006-01-02 15:04:05"))
- 		}
- 	}
- 	query := `
+// GetStatusStats 基于筛选与时间范围的状态分布聚合
+func (d *Database) GetStatusStats(filter *LogFilter) (*StatusStats, error) {
+	var (
+		conds []string
+		args  []interface{}
+	)
+	if filter != nil {
+		if filter.ProxyKeyName != "" {
+			conds = append(conds, "proxy_key_name = ?")
+			args = append(args, filter.ProxyKeyName)
+		}
+		if filter.ProviderGroup != "" {
+			conds = append(conds, "provider_group = ?")
+			args = append(args, filter.ProviderGroup)
+		}
+		if filter.Model != "" {
+			conds = append(conds, "model = ?")
+			args = append(args, filter.Model)
+		}
+		if filter.Stream != "" {
+			if filter.Stream == "true" {
+				conds = append(conds, "is_stream = 1")
+			} else if filter.Stream == "false" {
+				conds = append(conds, "is_stream = 0")
+			}
+		}
+		if filter.Status != "" {
+			if filter.Status == "200" {
+				conds = append(conds, "status_code = 200")
+			} else if filter.Status == "error" {
+				conds = append(conds, "status_code != 200")
+			}
+		}
+		if filter.StartTime != nil {
+			conds = append(conds, "created_at >= ?")
+			args = append(args, filter.StartTime.Format("2006-01-02 15:04:05"))
+		}
+		if filter.EndTime != nil {
+			conds = append(conds, "created_at <= ?")
+			args = append(args, filter.EndTime.Format("2006-01-02 15:04:05"))
+		}
+	}
+	query := `
  		SELECT
  			SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) AS success_count,
  			SUM(CASE WHEN status_code != 200 THEN 1 ELSE 0 END) AS error_count
  		FROM request_logs`
- 	if len(conds) > 0 {
- 		query += " WHERE " + strings.Join(conds, " AND ")
- 	}
- 	var res StatusStats
- 	if err := d.db.QueryRow(query, args...).Scan(&res.Success, &res.Error); err != nil {
- 		return nil, fmt.Errorf("failed to query status stats: %w", err)
- 	}
- 	return &res, nil
- }
- 
- // GetTokensTimeline 基于筛选与时间范围的tokens时间序列；≤24h按小时，否则按天
- func (d *Database) GetTokensTimeline(filter *LogFilter) ([]*TimelinePoint, error) {
- 	var (
- 		conds []string
- 		args  []interface{}
- 	)
- 	var start, end time.Time
- 	hasRange := false
- 	if filter != nil {
- 		if filter.ProxyKeyName != "" {
- 			conds = append(conds, "proxy_key_name = ?")
- 			args = append(args, filter.ProxyKeyName)
- 		}
- 		if filter.ProviderGroup != "" {
- 			conds = append(conds, "provider_group = ?")
- 			args = append(args, filter.ProviderGroup)
- 		}
- 		if filter.Model != "" {
- 			conds = append(conds, "model = ?")
- 			args = append(args, filter.Model)
- 		}
- 		if filter.Stream != "" {
- 			if filter.Stream == "true" {
- 				conds = append(conds, "is_stream = 1")
- 			} else if filter.Stream == "false" {
- 				conds = append(conds, "is_stream = 0")
- 			}
- 		}
- 		// 注意：不要用 Status 限制到 success-only，这里要返回 total 与 success 两条序列
- 		if filter.StartTime != nil {
- 			start = *filter.StartTime
- 			conds = append(conds, "created_at >= ?")
- 			args = append(args, start.Format("2006-01-02 15:04:05"))
- 			hasRange = true
- 		}
- 		if filter.EndTime != nil {
- 			end = *filter.EndTime
- 			conds = append(conds, "created_at <= ?")
- 			args = append(args, end.Format("2006-01-02 15:04:05"))
- 			hasRange = true
- 		}
- 	}
- 	// 自动选择粒度
- 	bucket := "%Y-%m-%d"
- 	if hasRange {
- 		if end.IsZero() {
- 			end = time.Now()
- 		}
- 		if start.IsZero() {
- 			// 默认取最近24h
- 			start = end.Add(-24 * time.Hour)
- 		}
- 		if end.Sub(start) <= 24*time.Hour {
- 			bucket = "%Y-%m-%d %H:00"
- 		}
- 	}
- 	query := fmt.Sprintf(`
+	if len(conds) > 0 {
+		query += " WHERE " + strings.Join(conds, " AND ")
+	}
+	var res StatusStats
+	if err := d.db.QueryRow(query, args...).Scan(&res.Success, &res.Error); err != nil {
+		return nil, fmt.Errorf("failed to query status stats: %w", err)
+	}
+	return &res, nil
+}
+
+// GetTokensTimeline 基于筛选与时间范围的tokens时间序列；≤24h按小时，否则按天
+func (d *Database) GetTokensTimeline(filter *LogFilter) ([]*TimelinePoint, error) {
+	var (
+		conds []string
+		args  []interface{}
+	)
+	var start, end time.Time
+	hasRange := false
+	if filter != nil {
+		if filter.ProxyKeyName != "" {
+			conds = append(conds, "proxy_key_name = ?")
+			args = append(args, filter.ProxyKeyName)
+		}
+		if filter.ProviderGroup != "" {
+			conds = append(conds, "provider_group = ?")
+			args = append(args, filter.ProviderGroup)
+		}
+		if filter.Model != "" {
+			conds = append(conds, "model = ?")
+			args = append(args, filter.Model)
+		}
+		if filter.Stream != "" {
+			if filter.Stream == "true" {
+				conds = append(conds, "is_stream = 1")
+			} else if filter.Stream == "false" {
+				conds = append(conds, "is_stream = 0")
+			}
+		}
+		// 注意：不要用 Status 限制到 success-only，这里要返回 total 与 success 两条序列
+		if filter.StartTime != nil {
+			start = *filter.StartTime
+			conds = append(conds, "created_at >= ?")
+			args = append(args, start.Format("2006-01-02 15:04:05"))
+			hasRange = true
+		}
+		if filter.EndTime != nil {
+			end = *filter.EndTime
+			conds = append(conds, "created_at <= ?")
+			args = append(args, end.Format("2006-01-02 15:04:05"))
+			hasRange = true
+		}
+	}
+	// 自动选择粒度
+	bucket := "%Y-%m-%d"
+	if hasRange {
+		if end.IsZero() {
+			end = time.Now()
+		}
+		if start.IsZero() {
+			// 默认取最近24h
+			start = end.Add(-24 * time.Hour)
+		}
+		if end.Sub(start) <= 24*time.Hour {
+			bucket = "%Y-%m-%d %H:00"
+		}
+	}
+	query := fmt.Sprintf(`
  		SELECT
  			strftime('%s', created_at) AS bucket_time,
  			SUM(tokens_used) AS total_tokens,
  			SUM(CASE WHEN status_code = 200 THEN tokens_used ELSE 0 END) AS success_tokens
  		FROM request_logs`, bucket)
- 	if len(conds) > 0 {
- 		query += " WHERE " + strings.Join(conds, " AND ")
- 	}
- 	query += " GROUP BY bucket_time ORDER BY bucket_time ASC"
- 
- 	rows, err := d.db.Query(query, args...)
- 	if err != nil {
- 		return nil, fmt.Errorf("failed to query tokens timeline: %w", err)
- 	}
- 	defer rows.Close()
- 
- 	var out []*TimelinePoint
- 	for rows.Next() {
- 		var t TimelinePoint
- 		if err := rows.Scan(&t.Date, &t.Total, &t.Success); err != nil {
- 			return nil, fmt.Errorf("failed to scan timeline row: %w", err)
- 		}
- 		out = append(out, &t)
- 	}
- 	return out, nil
- }
- 
- // GetGroupTokensStats 基于筛选与时间范围的分组tokens聚合（按 total desc）
- func (d *Database) GetGroupTokensStats(filter *LogFilter) ([]*GroupTokensStat, error) {
- 	var (
- 		conds []string
- 		args  []interface{}
- 	)
- 	if filter != nil {
- 		if filter.ProxyKeyName != "" {
- 			conds = append(conds, "proxy_key_name = ?")
- 			args = append(args, filter.ProxyKeyName)
- 		}
- 		if filter.ProviderGroup != "" {
- 			conds = append(conds, "provider_group = ?")
- 			args = append(args, filter.ProviderGroup)
- 		}
- 		if filter.Model != "" {
- 			conds = append(conds, "model = ?")
- 			args = append(args, filter.Model)
- 		}
- 		if filter.Stream != "" {
- 			if filter.Stream == "true" {
- 				conds = append(conds, "is_stream = 1")
- 			} else if filter.Stream == "false" {
- 				conds = append(conds, "is_stream = 0")
- 			}
- 		}
- 		if filter.Status != "" {
- 			if filter.Status == "200" {
- 				conds = append(conds, "status_code = 200")
- 			} else if filter.Status == "error" {
- 				conds = append(conds, "status_code != 200")
- 			}
- 		}
- 		if filter.StartTime != nil {
- 			conds = append(conds, "created_at >= ?")
- 			args = append(args, filter.StartTime.Format("2006-01-02 15:04:05"))
- 		}
- 		if filter.EndTime != nil {
- 			conds = append(conds, "created_at <= ?")
- 			args = append(args, filter.EndTime.Format("2006-01-02 15:04:05"))
- 		}
- 	}
- 	query := `
+	if len(conds) > 0 {
+		query += " WHERE " + strings.Join(conds, " AND ")
+	}
+	query += " GROUP BY bucket_time ORDER BY bucket_time ASC"
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query tokens timeline: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*TimelinePoint
+	for rows.Next() {
+		var t TimelinePoint
+		if err := rows.Scan(&t.Date, &t.Total, &t.Success); err != nil {
+			return nil, fmt.Errorf("failed to scan timeline row: %w", err)
+		}
+		out = append(out, &t)
+	}
+	return out, nil
+}
+
+// GetGroupTokensStats 基于筛选与时间范围的分组tokens聚合（按 total desc）
+func (d *Database) GetGroupTokensStats(filter *LogFilter) ([]*GroupTokensStat, error) {
+	var (
+		conds []string
+		args  []interface{}
+	)
+	if filter != nil {
+		if filter.ProxyKeyName != "" {
+			conds = append(conds, "proxy_key_name = ?")
+			args = append(args, filter.ProxyKeyName)
+		}
+		if filter.ProviderGroup != "" {
+			conds = append(conds, "provider_group = ?")
+			args = append(args, filter.ProviderGroup)
+		}
+		if filter.Model != "" {
+			conds = append(conds, "model = ?")
+			args = append(args, filter.Model)
+		}
+		if filter.Stream != "" {
+			if filter.Stream == "true" {
+				conds = append(conds, "is_stream = 1")
+			} else if filter.Stream == "false" {
+				conds = append(conds, "is_stream = 0")
+			}
+		}
+		if filter.Status != "" {
+			if filter.Status == "200" {
+				conds = append(conds, "status_code = 200")
+			} else if filter.Status == "error" {
+				conds = append(conds, "status_code != 200")
+			}
+		}
+		if filter.StartTime != nil {
+			conds = append(conds, "created_at >= ?")
+			args = append(args, filter.StartTime.Format("2006-01-02 15:04:05"))
+		}
+		if filter.EndTime != nil {
+			conds = append(conds, "created_at <= ?")
+			args = append(args, filter.EndTime.Format("2006-01-02 15:04:05"))
+		}
+	}
+	query := `
  		SELECT
  			COALESCE(provider_group, '') AS grp,
  			SUM(tokens_used) AS total_tokens,
  			SUM(CASE WHEN status_code = 200 THEN tokens_used ELSE 0 END) AS success_tokens
  		FROM request_logs`
- 	if len(conds) > 0 {
- 		query += " WHERE " + strings.Join(conds, " AND ")
- 	}
- 	query += " GROUP BY grp ORDER BY total_tokens DESC"
- 
- 	rows, err := d.db.Query(query, args...)
- 	if err != nil {
- 		return nil, fmt.Errorf("failed to query group tokens stats: %w", err)
- 	}
- 	defer rows.Close()
- 
- 	var out []*GroupTokensStat
- 	for rows.Next() {
- 		var g GroupTokensStat
- 		if err := rows.Scan(&g.Group, &g.Total, &g.Success); err != nil {
- 			return nil, fmt.Errorf("failed to scan group tokens stat: %w", err)
- 		}
- 		if g.Group == "" {
- 			g.Group = "-"
- 		}
- 		out = append(out, &g)
- 	}
- 	return out, nil
- }
+	if len(conds) > 0 {
+		query += " WHERE " + strings.Join(conds, " AND ")
+	}
+	query += " GROUP BY grp ORDER BY total_tokens DESC"
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query group tokens stats: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*GroupTokensStat
+	for rows.Next() {
+		var g GroupTokensStat
+		if err := rows.Scan(&g.Group, &g.Total, &g.Success); err != nil {
+			return nil, fmt.Errorf("failed to scan group tokens stat: %w", err)
+		}
+		if g.Group == "" {
+			g.Group = "-"
+		}
+		out = append(out, &g)
+	}
+	return out, nil
+}

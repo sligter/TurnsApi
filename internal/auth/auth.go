@@ -49,6 +49,48 @@ func NewAuthManager(config *internal.Config) *AuthManager {
 	return am
 }
 
+func (am *AuthManager) isSecureRequest(c *gin.Context) bool {
+	if c.Request.TLS != nil {
+		return true
+	}
+
+	if proto := c.GetHeader("X-Forwarded-Proto"); strings.EqualFold(proto, "https") {
+		return true
+	}
+
+	if ssl := c.GetHeader("X-Forwarded-Ssl"); strings.EqualFold(ssl, "on") {
+		return true
+	}
+
+	return false
+}
+
+func (am *AuthManager) SetAuthCookie(c *gin.Context, token string) {
+	maxAge := int(am.config.Auth.SessionTimeout.Seconds())
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     "auth_token",
+		Value:    token,
+		Path:     "/",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   am.isSecureRequest(c),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (am *AuthManager) ClearAuthCookie(c *gin.Context) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     "auth_token",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+		HttpOnly: true,
+		Secure:   am.isSecureRequest(c),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
 // generateToken 生成随机token
 func (am *AuthManager) generateToken() string {
 	bytes := make([]byte, 32)
@@ -218,7 +260,7 @@ func (am *AuthManager) WebAuthMiddleware() gin.HandlerFunc {
 
 		_, valid := am.ValidateToken(token)
 		if !valid {
-			c.SetCookie("auth_token", "", -1, "/", "", false, true)
+			am.ClearAuthCookie(c)
 			c.Redirect(http.StatusFound, "/auth/login")
 			c.Abort()
 			return
@@ -331,7 +373,7 @@ func (am *AuthManager) APIKeyAuthMiddleware() gin.HandlerFunc {
 		// 将密钥信息存储到上下文中
 		c.Set("api_key", apiKey)
 		c.Set("key_info", keyInfo)
-		
+
 		// 如果keyInfo是ProxyKey类型，提取名称和ID
 		if proxyKey, ok := keyInfo.(*logger.ProxyKey); ok {
 			c.Set("proxy_key_name", proxyKey.Name)
@@ -382,7 +424,7 @@ func (am *AuthManager) HandleLogin(c *gin.Context) {
 	token := session.Token
 
 	// 设置cookie
-	c.SetCookie("auth_token", token, int(am.config.Auth.SessionTimeout.Seconds()), "/", "", false, true)
+	am.SetAuthCookie(c, token)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -403,7 +445,7 @@ func (am *AuthManager) HandleLogout(c *gin.Context) {
 	}
 
 	// 清除cookie
-	c.SetCookie("auth_token", "", -1, "/", "", false, true)
+	am.ClearAuthCookie(c)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

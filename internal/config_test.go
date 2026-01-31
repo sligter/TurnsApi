@@ -363,9 +363,11 @@ func TestGetAddress(t *testing.T) {
 		Server: struct {
 			Port string `yaml:"port"`
 			Host string `yaml:"host"`
+			Mode string `yaml:"mode"`
 		}{
 			Port: "8080",
 			Host: "localhost",
+			Mode: "release",
 		},
 	}
 

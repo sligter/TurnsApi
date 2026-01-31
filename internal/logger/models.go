@@ -6,48 +6,48 @@ import (
 
 // RequestLog 请求日志结构
 type RequestLog struct {
-	ID              int64     `json:"id" db:"id"`
-	ProxyKeyName    string    `json:"proxy_key_name" db:"proxy_key_name"` // 代理服务API密钥名称
-	ProxyKeyID      string    `json:"proxy_key_id" db:"proxy_key_id"`     // 代理服务API密钥ID
-	ProviderGroup   string    `json:"provider_group" db:"provider_group"` // 提供商分组
-	OpenRouterKey   string    `json:"openrouter_key" db:"openrouter_key"` // 使用的OpenRouter密钥（脱敏）
-	Model           string    `json:"model" db:"model"`
-	RequestBody     string    `json:"request_body" db:"request_body"`
-	ResponseBody    string    `json:"response_body" db:"response_body"`
-	StatusCode      int       `json:"status_code" db:"status_code"`
-	IsStream        bool      `json:"is_stream" db:"is_stream"`
-	Duration        int64     `json:"duration" db:"duration"` // 毫秒
-	TokensUsed      int       `json:"tokens_used" db:"tokens_used"`
-	TokensEstimated bool      `json:"tokens_estimated" db:"tokens_estimated"` // 是否使用了备用估算方法
-	Error           string    `json:"error" db:"error"`
-	ClientIP        string    `json:"client_ip" db:"client_ip"` // 客户端IP地址
+	ID              int64  `json:"id" db:"id"`
+	ProxyKeyName    string `json:"proxy_key_name" db:"proxy_key_name"` // 代理服务API密钥名称
+	ProxyKeyID      string `json:"proxy_key_id" db:"proxy_key_id"`     // 代理服务API密钥ID
+	ProviderGroup   string `json:"provider_group" db:"provider_group"` // 提供商分组
+	OpenRouterKey   string `json:"openrouter_key" db:"openrouter_key"` // 使用的OpenRouter密钥（脱敏）
+	Model           string `json:"model" db:"model"`
+	RequestBody     string `json:"request_body" db:"request_body"`
+	ResponseBody    string `json:"response_body" db:"response_body"`
+	StatusCode      int    `json:"status_code" db:"status_code"`
+	IsStream        bool   `json:"is_stream" db:"is_stream"`
+	Duration        int64  `json:"duration" db:"duration"` // 毫秒
+	TokensUsed      int    `json:"tokens_used" db:"tokens_used"`
+	TokensEstimated bool   `json:"tokens_estimated" db:"tokens_estimated"` // 是否使用了备用估算方法
+	Error           string `json:"error" db:"error"`
+	ClientIP        string `json:"client_ip" db:"client_ip"` // 客户端IP地址
 	// 工具调用相关字段
-	HasToolCalls    bool      `json:"has_tool_calls" db:"has_tool_calls"`       // 是否包含工具调用
-	ToolCallsCount  int       `json:"tool_calls_count" db:"tool_calls_count"`   // 工具调用数量
-	ToolNames       string    `json:"tool_names" db:"tool_names"`               // 工具名称列表（JSON数组字符串）
-	CreatedAt       time.Time `json:"created_at" db:"created_at"`
+	HasToolCalls   bool      `json:"has_tool_calls" db:"has_tool_calls"`     // 是否包含工具调用
+	ToolCallsCount int       `json:"tool_calls_count" db:"tool_calls_count"` // 工具调用数量
+	ToolNames      string    `json:"tool_names" db:"tool_names"`             // 工具名称列表（逗号分隔）
+	CreatedAt      time.Time `json:"created_at" db:"created_at"`
 }
 
 // RequestLogSummary 请求日志摘要（用于列表显示）
 type RequestLogSummary struct {
-	ID              int64     `json:"id"`
-	ProxyKeyName    string    `json:"proxy_key_name"`
-	ProxyKeyID      string    `json:"proxy_key_id"`
-	ProviderGroup   string    `json:"provider_group"`
-	OpenRouterKey   string    `json:"openrouter_key"`
-	Model           string    `json:"model"`
-	StatusCode      int       `json:"status_code"`
-	IsStream        bool      `json:"is_stream"`
-	Duration        int64     `json:"duration"`
-	TokensUsed      int       `json:"tokens_used"`
-	TokensEstimated bool      `json:"tokens_estimated"`
-	Error           string    `json:"error"`
-	ClientIP        string    `json:"client_ip"`
+	ID              int64  `json:"id"`
+	ProxyKeyName    string `json:"proxy_key_name"`
+	ProxyKeyID      string `json:"proxy_key_id"`
+	ProviderGroup   string `json:"provider_group"`
+	OpenRouterKey   string `json:"openrouter_key"`
+	Model           string `json:"model"`
+	StatusCode      int    `json:"status_code"`
+	IsStream        bool   `json:"is_stream"`
+	Duration        int64  `json:"duration"`
+	TokensUsed      int    `json:"tokens_used"`
+	TokensEstimated bool   `json:"tokens_estimated"`
+	Error           string `json:"error"`
+	ClientIP        string `json:"client_ip"`
 	// 工具调用相关字段
-	HasToolCalls    bool      `json:"has_tool_calls"`
-	ToolCallsCount  int       `json:"tool_calls_count"`
-	ToolNames       string    `json:"tool_names"`
-	CreatedAt       time.Time `json:"created_at"`
+	HasToolCalls   bool      `json:"has_tool_calls"`
+	ToolCallsCount int       `json:"tool_calls_count"`
+	ToolNames      string    `json:"tool_names"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // ProxyKey 代理服务API密钥结构
@@ -114,9 +114,9 @@ type StatusStats struct {
 
 // TimelinePoint tokens 时间序列点
 type TimelinePoint struct {
-	Date    string `json:"date"`   // "YYYY-MM-DD" 或 "YYYY-MM-DD HH:00"
-	Total   int64  `json:"total"`  // 总 tokens
-	Success int64  `json:"success"`// 成功 tokens
+	Date    string `json:"date"`    // "YYYY-MM-DD" 或 "YYYY-MM-DD HH:00"
+	Total   int64  `json:"total"`   // 总 tokens
+	Success int64  `json:"success"` // 成功 tokens
 }
 
 // GroupTokensStat 分组 tokens 聚合

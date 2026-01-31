@@ -599,10 +599,16 @@ func (p *MultiProviderProxy) sortKeysByPriority(keyStatuses map[string]*keymanag
 	}
 
 	var priorities []keyPriority
+	now := time.Now()
 
 	for key, status := range keyStatuses {
 		if !status.IsActive {
 			continue // 跳过非活跃密钥
+		}
+
+		// 跳过在限流冷却期内的密钥
+		if !status.RateLimitUntil.IsZero() && now.Before(status.RateLimitUntil) {
+			continue
 		}
 
 		priority := 0
@@ -613,11 +619,19 @@ func (p *MultiProviderProxy) sortKeysByPriority(keyStatuses map[string]*keymanag
 		}
 
 		// 错误较少的密钥优先级更高
-		priority -= int(status.ErrorCount)
+		priority -= int(status.ErrorCount) * 5
+
+		// 限流次数较少的密钥优先级更高（但不如错误那么严重）
+		priority -= int(status.RateLimitCount) * 2
 
 		// 最近使用较少的密钥优先级更高（负载均衡）
 		if time.Since(status.LastUsed) > time.Hour {
 			priority += 10
+		}
+
+		// 最近没有被限流的密钥优先级更高
+		if !status.LastRateLimitAt.IsZero() && time.Since(status.LastRateLimitAt) < 30*time.Minute {
+			priority -= 20 // 最近30分钟内被限流过，降低优先级
 		}
 
 		priorities = append(priorities, keyPriority{
