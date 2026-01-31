@@ -23,20 +23,18 @@ TurnsAPI 是一个高性能多提供商 API 代理服务，支持 OpenAI、Googl
 ### Docker 运行（推荐）
 
 ```bash
-# 1. 创建目录和配置
+# 1) 创建配置（推荐从示例复制）
 mkdir -p config logs data
 cp config/config.example.yaml config/config.yaml
-# 编辑 config/config.yaml 添加您的 API 密钥
 
-# 2. 运行服务
-docker run -d \
-  --name turnsapi \
-  -p 8080:8080 \
-  -v $(pwd)/config:/app/config \
-  -v $(pwd)/logs:/app/logs \
-  -v $(pwd)/data:/app/data \
-  bradleylzh/turnsapi:latest
+# 2) 启动（包含 turnsapi + postgres）
+docker compose up --build -d
+
+# turnsapi 默认映射端口：6001 -> 8080
+# postgres 默认映射端口：5435 -> 5432（防止与本机其它 postgres 冲突）
 ```
+
+> 提示：容器内 turnsapi 连接数据库请使用 `postgres:5432`（服务名+容器端口）；如果你在宿主机直连数据库，请使用 `localhost:5435`。
 
 ### 本地运行
 
@@ -44,12 +42,13 @@ docker run -d \
 git clone <repository-url>
 cd TurnsApi
 go mod tidy
-go run cmd/turnsapi/main.go -config config/config.yaml
+# go.mod 需要 Go 1.24+（Dockerfile 也已使用 golang:1.24-alpine）
+go run ./cmd/turnsapi -config config/config.yaml
 ```
 
 ### 验证安装
 
-访问 http://localhost:8080 查看管理界面
+访问 http://localhost:6001 查看管理界面（本地运行则为 http://localhost:8080）
 
 ## 🔧 配置说明
 
@@ -88,6 +87,10 @@ user_groups:
     request_params:
       temperature: 0.7
       max_tokens: 2000
+      # 强制覆盖客户端同名字段（包括 stream），也支持覆盖未建模字段（如 response_format 等）
+      # stream: false
+      # response_format:
+      #   type: "json_object"
     # 可选：RPM限制
     rpm_limit: 60
 
@@ -102,6 +105,22 @@ user_groups:
       - "gemini-pro"
       - "gemini-2.5-pro"
     use_native_response: true  # 启用原生响应格式
+```
+
+### 数据库与高并发写入（Postgres 推荐）
+
+```yaml
+database:
+  driver: "postgres"
+  # docker-compose 内使用 postgres 服务名（容器内端口固定为 5432）
+  dsn: "postgres://turnsapi:turnsapi@postgres:5432/turnsapi?sslmode=disable"
+
+# 高并发推荐开启：请求日志异步批量写入（降低请求阻塞与锁竞争）
+request_logs:
+  async_write: true
+  buffer: 10000
+  batch_size: 200
+  flush_interval: "200ms"
 ```
 
 ## 📡 API 使用
