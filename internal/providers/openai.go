@@ -186,7 +186,10 @@ func contentToString(v interface{}) string {
 	}
 }
 
-func responsesContentFromChatContent(content interface{}) interface{} {
+func responsesContentFromChatContent(content interface{}, textType string) interface{} {
+	if textType == "" {
+		textType = "input_text"
+	}
 	switch v := content.(type) {
 	case nil:
 		return []map[string]interface{}{}
@@ -196,7 +199,7 @@ func responsesContentFromChatContent(content interface{}) interface{} {
 		}
 		return []map[string]interface{}{
 			{
-				"type": "input_text",
+				"type": textType,
 				"text": v,
 			},
 		}
@@ -207,14 +210,18 @@ func responsesContentFromChatContent(content interface{}) interface{} {
 			case "text":
 				if part.Text != "" {
 					parts = append(parts, map[string]interface{}{
-						"type": "input_text",
+						"type": textType,
 						"text": part.Text,
 					})
 				}
 			case "image_url":
 				if part.ImageURL != nil && part.ImageURL.URL != "" {
+					imageType := "input_image"
+					if textType == "output_text" {
+						imageType = "output_image"
+					}
 					parts = append(parts, map[string]interface{}{
-						"type":      "input_image",
+						"type":      imageType,
 						"image_url": part.ImageURL.URL,
 					})
 				}
@@ -227,7 +234,7 @@ func responsesContentFromChatContent(content interface{}) interface{} {
 		if s == "" {
 			return []map[string]interface{}{}
 		}
-		return []map[string]interface{}{{"type": "input_text", "text": s}}
+		return []map[string]interface{}{{"type": textType, "text": s}}
 	case []interface{}:
 		parts := make([]map[string]interface{}, 0, len(v))
 		for _, raw := range v {
@@ -241,7 +248,7 @@ func responsesContentFromChatContent(content interface{}) interface{} {
 			case "text":
 				if txt, ok := m["text"].(string); ok && txt != "" {
 					parts = append(parts, map[string]interface{}{
-						"type": "input_text",
+						"type": textType,
 						"text": txt,
 					})
 				}
@@ -249,20 +256,28 @@ func responsesContentFromChatContent(content interface{}) interface{} {
 				switch u := m["image_url"].(type) {
 				case string:
 					if u != "" {
+						imageType := "input_image"
+						if textType == "output_text" {
+							imageType = "output_image"
+						}
 						parts = append(parts, map[string]interface{}{
-							"type":      "input_image",
+							"type":      imageType,
 							"image_url": u,
 						})
 					}
 				case map[string]interface{}:
 					if url, ok := u["url"].(string); ok && url != "" {
+						imageType := "input_image"
+						if textType == "output_text" {
+							imageType = "output_image"
+						}
 						parts = append(parts, map[string]interface{}{
-							"type":      "input_image",
+							"type":      imageType,
 							"image_url": url,
 						})
 					}
 				}
-			case "input_text", "input_image":
+			case "input_text", "input_image", "output_text", "output_image":
 				// already in Responses format
 				if len(m) > 0 {
 					parts = append(parts, m)
@@ -271,7 +286,7 @@ func responsesContentFromChatContent(content interface{}) interface{} {
 				// best-effort: if it's a plain {text: "..."} object
 				if txt, ok := m["text"].(string); ok && txt != "" {
 					parts = append(parts, map[string]interface{}{
-						"type": "input_text",
+						"type": textType,
 						"text": txt,
 					})
 				}
@@ -284,13 +299,13 @@ func responsesContentFromChatContent(content interface{}) interface{} {
 		if s == "" {
 			return []map[string]interface{}{}
 		}
-		return []map[string]interface{}{{"type": "input_text", "text": s}}
+		return []map[string]interface{}{{"type": textType, "text": s}}
 	default:
 		s := strings.TrimSpace(contentToString(content))
 		if s == "" {
 			return []map[string]interface{}{}
 		}
-		return []map[string]interface{}{{"type": "input_text", "text": s}}
+		return []map[string]interface{}{{"type": textType, "text": s}}
 	}
 }
 
@@ -321,7 +336,7 @@ func (p *OpenAIProvider) buildResponsesInput(messages []ChatMessage) ([]interfac
 			if !isEmptyContent(msg.Content) {
 				input = append(input, map[string]interface{}{
 					"role":    "assistant",
-					"content": responsesContentFromChatContent(msg.Content),
+					"content": responsesContentFromChatContent(msg.Content, "output_text"),
 				})
 			}
 			for _, tc := range msg.ToolCalls {
@@ -338,7 +353,7 @@ func (p *OpenAIProvider) buildResponsesInput(messages []ChatMessage) ([]interfac
 		default:
 			input = append(input, map[string]interface{}{
 				"role":    msg.Role,
-				"content": responsesContentFromChatContent(msg.Content),
+				"content": responsesContentFromChatContent(msg.Content, "input_text"),
 			})
 		}
 	}
