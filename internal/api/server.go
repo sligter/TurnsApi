@@ -129,7 +129,7 @@ func (s *Server) setupMiddleware() {
 	s.router.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+		c.Header("Access-Control-Allow-Headers", "Origin, Referer, Content-Type, Content-Length, Accept, Accept-Language, Priority, Sec-CH-UA, Sec-CH-UA-Mobile, Sec-CH-UA-Platform, Sec-Fetch-Dest, Sec-Fetch-Mode, Sec-Fetch-Site, User-Agent, Accept-Encoding, X-CSRF-Token, Authorization, X-Provider-Group, HTTP-Referer, X-Title")
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)

@@ -46,6 +46,11 @@ user_groups:
       - "sk-your-openai-key-2"
     headers:
       Content-Type: "application/json"
+      # 兼容部分 OpenAI-compatible 网关（如 OpenRouter 风格）：
+      # HTTP-Referer: "https://your-domain.com"
+      # X-Title: "TurnsAPI"
+    # 可选：启用 OpenAI Responses API（/v1/responses），默认 false
+    use_responses_api: false
     # 模型重命名映射
     model_mappings:
       "gpt-4-latest": "gpt-4"

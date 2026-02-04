@@ -39,17 +39,17 @@ func NewProviderRouterWithProxyKey(config *internal.Config, providerManager *pro
 // RouteRequest 路由请求结构
 type RouteRequest struct {
 	Model             string   `json:"model"`
-	ProviderGroup     string   `json:"provider_group,omitempty"`     // 可选的显式提供商分组
-	AllowedGroups     []string `json:"allowed_groups,omitempty"`     // 代理密钥允许访问的分组
-	ProxyKeyID        string   `json:"proxy_key_id,omitempty"`       // 代理密钥ID，用于分组选择
+	ProviderGroup     string   `json:"provider_group,omitempty"`      // 可选的显式提供商分组
+	AllowedGroups     []string `json:"allowed_groups,omitempty"`      // 代理密钥允许访问的分组
+	ProxyKeyID        string   `json:"proxy_key_id,omitempty"`        // 代理密钥ID，用于分组选择
 	ForceProviderType string   `json:"force_provider_type,omitempty"` // 强制指定提供商类型
 }
 
 // RouteResult 路由结果
 type RouteResult struct {
-	GroupID      string
-	Group        *internal.UserGroup
-	Provider     providers.Provider
+	GroupID        string
+	Group          *internal.UserGroup
+	Provider       providers.Provider
 	ProviderConfig *providers.ProviderConfig
 }
 
@@ -131,7 +131,7 @@ func (pr *ProviderRouter) routeByModel(modelName string) (*internal.UserGroup, s
 		if !group.Enabled {
 			continue
 		}
-		
+
 		// 如果分组指定了模型列表，检查是否包含该模型
 		if len(group.Models) > 0 {
 			for _, model := range group.Models {
@@ -208,13 +208,14 @@ func (pr *ProviderRouter) createProviderConfig(groupID string, group *internal.U
 	apiKey := group.APIKeys[0]
 
 	config := &providers.ProviderConfig{
-		BaseURL:       group.BaseURL,
-		APIKey:        apiKey,
-		Timeout:       group.Timeout,
-		MaxRetries:    group.MaxRetries,
-		Headers:       make(map[string]string),
-		ProviderType:  group.ProviderType,
-		RequestParams: make(map[string]interface{}),
+		BaseURL:         group.BaseURL,
+		APIKey:          apiKey,
+		Timeout:         group.Timeout,
+		MaxRetries:      group.MaxRetries,
+		Headers:         make(map[string]string),
+		ProviderType:    group.ProviderType,
+		RequestParams:   make(map[string]interface{}),
+		UseResponsesAPI: group.UseResponsesAPI,
 	}
 
 	// 复制头部信息
@@ -442,8 +443,6 @@ func (pr *ProviderRouter) RouteWithRetry(req *RouteRequest) (*RouteResult, error
 	return nil, fmt.Errorf("no suitable provider group found for model '%s'", req.Model)
 }
 
-
-
 // GetAvailableGroups 获取所有可用的分组
 func (pr *ProviderRouter) GetAvailableGroups() map[string]*internal.UserGroup {
 	return pr.config.GetEnabledGroups()
@@ -565,12 +564,12 @@ func (pr *ProviderRouter) inferProviderTypeFromModel(modelName string) string {
 // GetSupportedModels 获取所有支持的模型列表
 func (pr *ProviderRouter) GetSupportedModels() []string {
 	modelSet := make(map[string]bool)
-	
+
 	for _, group := range pr.config.UserGroups {
 		if !group.Enabled {
 			continue
 		}
-		
+
 		// 如果分组指定了模型列表，添加这些模型
 		if len(group.Models) > 0 {
 			for _, model := range group.Models {
@@ -578,13 +577,13 @@ func (pr *ProviderRouter) GetSupportedModels() []string {
 			}
 		}
 	}
-	
+
 	// 转换为切片
 	models := make([]string, 0, len(modelSet))
 	for model := range modelSet {
 		models = append(models, model)
 	}
-	
+
 	return models
 }
 
@@ -594,7 +593,7 @@ func (pr *ProviderRouter) GetProviderTypeForGroup(groupID string) (string, error
 	if !exists {
 		return "", fmt.Errorf("group '%s' not found", groupID)
 	}
-	
+
 	return group.ProviderType, nil
 }
 

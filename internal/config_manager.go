@@ -25,6 +25,7 @@ func toDBUserGroup(group *UserGroup) *database.UserGroup {
 		RequestParams:     group.RequestParams,
 		ModelMappings:     group.ModelMappings,
 		UseNativeResponse: group.UseNativeResponse,
+		UseResponsesAPI:   group.UseResponsesAPI,
 		RPMLimit:          group.RPMLimit,
 	}
 }
@@ -45,6 +46,7 @@ func fromDBUserGroup(dbGroup *database.UserGroup) *UserGroup {
 		RequestParams:     dbGroup.RequestParams,
 		ModelMappings:     dbGroup.ModelMappings,
 		UseNativeResponse: dbGroup.UseNativeResponse,
+		UseResponsesAPI:   dbGroup.UseResponsesAPI,
 		RPMLimit:          dbGroup.RPMLimit,
 	}
 }

@@ -98,7 +98,6 @@ func NewMultiProviderHealthChecker(
 		cancel:          cancel,
 	}
 
-
 	return checker
 }
 
@@ -269,12 +268,13 @@ func (hc *MultiProviderHealthChecker) performProviderHealthCheck(groupID string,
 
 	// 创建提供商配置
 	providerConfig := &providers.ProviderConfig{
-		BaseURL:      group.BaseURL,
-		APIKey:       apiKey,
-		Timeout:      group.Timeout,
-		MaxRetries:   1, // 健康检查只尝试一次
-		Headers:      group.Headers,
-		ProviderType: group.ProviderType,
+		BaseURL:         group.BaseURL,
+		APIKey:          apiKey,
+		Timeout:         group.Timeout,
+		MaxRetries:      1, // 健康检查只尝试一次
+		Headers:         group.Headers,
+		ProviderType:    group.ProviderType,
+		UseResponsesAPI: group.UseResponsesAPI,
 	}
 
 	// 获取提供商实例

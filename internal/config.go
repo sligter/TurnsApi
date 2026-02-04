@@ -27,6 +27,7 @@ type UserGroup struct {
 	RequestParams     map[string]interface{} `yaml:"request_params,omitempty"`      // JSON请求参数覆盖
 	ModelMappings     map[string]string      `yaml:"model_mappings,omitempty"`      // 模型名称映射：别名 -> 原始模型名
 	UseNativeResponse bool                   `yaml:"use_native_response,omitempty"` // 是否使用原生接口响应格式
+	UseResponsesAPI   bool                   `yaml:"use_responses_api,omitempty"`   // OpenAI: 使用 /v1/responses 替代 /v1/chat/completions
 	RPMLimit          int                    `yaml:"rpm_limit,omitempty"`           // 每分钟请求数限制
 	// 密钥管理策略
 	DisablePermanentBan bool `yaml:"disable_permanent_ban,omitempty"` // 禁用永久禁用策略（默认false，即启用永久禁用）

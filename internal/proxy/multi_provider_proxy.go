@@ -35,6 +35,75 @@ type MultiProviderProxy struct {
 	database        *database.GroupsDB
 }
 
+func hasHeaderKey(m map[string]string, key string) bool {
+	for k := range m {
+		if strings.EqualFold(k, key) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *MultiProviderProxy) applyForwardHeaders(c *gin.Context, cfg *providers.ProviderConfig) {
+	if c == nil || cfg == nil {
+		return
+	}
+	if cfg.Headers == nil {
+		cfg.Headers = make(map[string]string)
+	}
+
+	// Forward a small allowlist of non-sensitive headers that some OpenAI-compatible gateways require.
+	// Prefer incoming `HTTP-Referer`, fallback to standard `Referer`.
+	if !hasHeaderKey(cfg.Headers, "HTTP-Referer") {
+		ref := strings.TrimSpace(c.GetHeader("HTTP-Referer"))
+		if ref == "" {
+			ref = strings.TrimSpace(c.GetHeader("Referer"))
+		}
+		if ref != "" {
+			cfg.Headers["HTTP-Referer"] = ref
+		}
+	}
+
+	if !hasHeaderKey(cfg.Headers, "Referer") {
+		if ref := strings.TrimSpace(c.GetHeader("Referer")); ref != "" {
+			cfg.Headers["Referer"] = ref
+		}
+	}
+
+	if !hasHeaderKey(cfg.Headers, "Origin") {
+		if origin := strings.TrimSpace(c.GetHeader("Origin")); origin != "" {
+			cfg.Headers["Origin"] = origin
+		}
+	}
+
+	if !hasHeaderKey(cfg.Headers, "X-Title") {
+		if v := strings.TrimSpace(c.GetHeader("X-Title")); v != "" {
+			cfg.Headers["X-Title"] = v
+		}
+	}
+
+	// Browser-like headers (optional; forwarded only when present).
+	for _, h := range []string{
+		"Accept",
+		"Accept-Language",
+		"Priority",
+		"Sec-CH-UA",
+		"Sec-CH-UA-Mobile",
+		"Sec-CH-UA-Platform",
+		"Sec-Fetch-Dest",
+		"Sec-Fetch-Mode",
+		"Sec-Fetch-Site",
+		"User-Agent",
+	} {
+		if hasHeaderKey(cfg.Headers, h) {
+			continue
+		}
+		if v := strings.TrimSpace(c.GetHeader(h)); v != "" {
+			cfg.Headers[h] = v
+		}
+	}
+}
+
 // NewMultiProviderProxy 创建多提供商代理
 func NewMultiProviderProxy(
 	config *internal.Config,
@@ -518,6 +587,17 @@ func (p *MultiProviderProxy) tryGroupRotationWithLimit(
 			// 更新提供商配置中的API密钥
 			p.providerRouter.UpdateProviderConfig(routeResult.ProviderConfig, apiKey)
 
+			// Forward allowlisted request headers into provider headers (if not configured at group-level).
+			p.applyForwardHeaders(c, routeResult.ProviderConfig)
+
+			// 获取与该 API Key 对应的提供商实例（避免在并发场景下共享可变的 Config）
+			if provider, err := p.providerManager.GetProvider(groupID, routeResult.ProviderConfig); err == nil {
+				routeResult.Provider = provider
+			} else {
+				log.Printf("获取提供商实例失败: group=%s key=%s err=%v", groupID, p.maskKey(apiKey), err)
+				continue
+			}
+
 			// 尝试处理请求（按分组强制覆盖 request_params；每次尝试都使用独立副本，避免跨分组污染）
 			attemptReq := *req
 			if req.Extra != nil {
@@ -625,6 +705,17 @@ func (p *MultiProviderProxy) tryGroupWithAllKeys(
 
 		// 更新提供商配置中的API密钥
 		p.providerRouter.UpdateProviderConfig(routeResult.ProviderConfig, apiKey)
+
+		// Forward allowlisted request headers into provider headers (if not configured at group-level).
+		p.applyForwardHeaders(c, routeResult.ProviderConfig)
+
+		// 获取与该 API Key 对应的提供商实例（避免在并发场景下共享可变的 Config）
+		if provider, err := p.providerManager.GetProvider(routeResult.GroupID, routeResult.ProviderConfig); err == nil {
+			routeResult.Provider = provider
+		} else {
+			log.Printf("获取提供商实例失败: group=%s key=%s err=%v", routeResult.GroupID, p.maskKey(apiKey), err)
+			continue
+		}
 
 		// 尝试处理请求（按分组强制覆盖 request_params；每次尝试都使用独立副本，避免跨分组污染）
 		attemptReq := *req
@@ -1082,13 +1173,14 @@ func (p *MultiProviderProxy) handleGroupModels(c *gin.Context, groupID string) {
 
 	// 创建提供商配置
 	providerConfig := &providers.ProviderConfig{
-		BaseURL:       group.BaseURL,
-		APIKey:        apiKey,
-		Timeout:       group.Timeout,
-		MaxRetries:    group.MaxRetries,
-		Headers:       group.Headers,
-		ProviderType:  group.ProviderType,
-		RequestParams: group.RequestParams,
+		BaseURL:         group.BaseURL,
+		APIKey:          apiKey,
+		Timeout:         group.Timeout,
+		MaxRetries:      group.MaxRetries,
+		Headers:         group.Headers,
+		ProviderType:    group.ProviderType,
+		RequestParams:   group.RequestParams,
+		UseResponsesAPI: group.UseResponsesAPI,
 	}
 
 	// 获取提供商实例
@@ -1167,13 +1259,14 @@ func (p *MultiProviderProxy) handleAllModels(c *gin.Context) {
 
 		// 创建提供商配置
 		providerConfig := &providers.ProviderConfig{
-			BaseURL:       group.BaseURL,
-			APIKey:        apiKey,
-			Timeout:       group.Timeout,
-			MaxRetries:    group.MaxRetries,
-			Headers:       group.Headers,
-			ProviderType:  group.ProviderType,
-			RequestParams: group.RequestParams,
+			BaseURL:         group.BaseURL,
+			APIKey:          apiKey,
+			Timeout:         group.Timeout,
+			MaxRetries:      group.MaxRetries,
+			Headers:         group.Headers,
+			ProviderType:    group.ProviderType,
+			RequestParams:   group.RequestParams,
+			UseResponsesAPI: group.UseResponsesAPI,
 		}
 
 		// 获取提供商实例

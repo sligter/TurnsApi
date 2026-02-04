@@ -10,6 +10,8 @@ TurnsAPI 是一个高性能多提供商 API 代理服务，支持 OpenAI、Googl
 - **模型重命名**: 支持模型别名映射，统一不同分组的模型名称
 - **参数覆盖**: 分组级别的请求参数覆盖（temperature、max_tokens等）
 - **流式响应**: 完全支持 SSE 流式响应和原生接口格式
+- **OpenAI Responses API**: OpenAI 分组可选使用 `/v1/responses` 作为上游（仍对外保持 Chat Completions 兼容格式）
+  - 部分 OpenAI-compatible 网关可能要求 `HTTP-Referer` / `X-Title` / `Origin` 等头；TurnsAPI 支持在分组 `headers` 配置，或从客户端请求头转发（不会覆盖分组已配置值）
 - **实时监控**: Web 界面监控 API 密钥状态和服务性能
 - **日志分析**: 完整的请求日志记录和统计分析
 - **安全认证**: 内置认证系统保护 API 和管理界面
@@ -93,6 +95,8 @@ user_groups:
       #   type: "json_object"
     # 可选：RPM限制
     rpm_limit: 60
+    # 可选：启用 OpenAI Responses API（/v1/responses），默认 false
+    use_responses_api: false
 
   google_gemini:
     name: "Google Gemini"

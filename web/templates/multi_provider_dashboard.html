@@ -1648,7 +1648,7 @@
                                         高级选项
                                     </h5>
                                     <div
-                                        class="bg-white rounded-lg p-4 border border-gray-200 shadow-sm"
+                                        class="bg-white rounded-lg p-4 border border-gray-200 shadow-sm space-y-4"
                                     >
                                         <label
                                             class="flex items-start space-x-3 cursor-pointer"
@@ -1667,6 +1667,33 @@
                                                     class="text-xs text-gray-500 mt-1"
                                                 >
                                                     勾选后将返回提供商的原生响应格式，而不是OpenAI兼容格式
+                                                </p>
+                                            </div>
+                                        </label>
+
+                                        <label
+                                            x-show="groupFormData.provider_type === 'openai'"
+                                            class="flex items-start space-x-3 cursor-pointer"
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                x-model="groupFormData.use_responses_api"
+                                                class="mt-1 rounded border-gray-300 text-emerald-600 shadow-sm focus:border-emerald-300 focus:ring focus:ring-emerald-200 focus:ring-opacity-50"
+                                            />
+                                            <div>
+                                                <span
+                                                    class="text-sm font-medium text-gray-700"
+                                                    >启用 Responses API</span
+                                                >
+                                                <p
+                                                    class="text-xs text-gray-500 mt-1"
+                                                >
+                                                    对 OpenAI 官方接口使用
+                                                    <code class="px-1">/v1/responses</code>
+                                                    替代
+                                                    <code class="px-1">/v1/chat/completions</code>
+                                                    进行请求（服务仍会返回 OpenAI Chat
+                                                    Completions 兼容格式；开启“原生响应”时会转发原生 SSE 事件）
                                                 </p>
                                             </div>
                                         </label>
@@ -4330,6 +4357,7 @@
                         api_keys: [""],
                         models: [],
                         use_native_response: false,
+                        use_responses_api: false,
                         rpm_limit: 0,
                         headers: {}, // HTTP headers
                         disable_permanent_ban: false,
@@ -5202,6 +5230,9 @@
                                 use_native_response: Boolean(
                                     fullGroupData.use_native_response,
                                 ),
+                                use_responses_api: Boolean(
+                                    fullGroupData.use_responses_api,
+                                ),
                                 rpm_limit:
                                     parseInt(fullGroupData.rpm_limit) || 0,
                                 headers: fullGroupData.headers || {},
@@ -5502,6 +5533,9 @@
                                                 use_native_response:
                                                     this.groupFormData
                                                         .use_native_response,
+                                                use_responses_api:
+                                                    this.groupFormData
+                                                        .use_responses_api,
                                                 rpm_limit:
                                                     this.groupFormData
                                                         .rpm_limit,
@@ -5596,6 +5630,7 @@
                             api_keys: [""],
                             models: [],
                             use_native_response: false,
+                            use_responses_api: false,
                             rpm_limit: 0,
                             headers: {},
                             disable_permanent_ban: false,

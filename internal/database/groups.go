@@ -32,6 +32,7 @@ type UserGroup struct {
 	RequestParams     map[string]interface{} `yaml:"request_params,omitempty" json:"request_params,omitempty"`           // JSON请求参数覆盖
 	ModelMappings     map[string]string      `yaml:"model_mappings,omitempty" json:"model_mappings,omitempty"`           // 模型名称映射：别名 -> 原始模型名
 	UseNativeResponse bool                   `yaml:"use_native_response,omitempty" json:"use_native_response,omitempty"` // 是否使用原生接口响应格式
+	UseResponsesAPI   bool                   `yaml:"use_responses_api,omitempty" json:"use_responses_api,omitempty"`     // OpenAI: 使用 /v1/responses 替代 /v1/chat/completions
 	RPMLimit          int                    `yaml:"rpm_limit,omitempty" json:"rpm_limit,omitempty"`                     // 每分钟请求数限制
 }
 
@@ -234,6 +235,7 @@ func (gdb *GroupsDB) initTables() error {
 		request_params TEXT, -- JSON object of request parameters override
 		model_mappings TEXT, -- JSON object of model name mappings: alias -> original
 		use_native_response BOOLEAN NOT NULL DEFAULT 0, -- 是否使用原生接口响应格式
+		use_responses_api BOOLEAN NOT NULL DEFAULT 0, -- OpenAI: use /v1/responses instead of /v1/chat/completions
 		rpm_limit INTEGER NOT NULL DEFAULT 0, -- 每分钟请求数限制，0表示无限制
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -317,6 +319,7 @@ func (gdb *GroupsDB) initTablesPostgres() error {
 		request_params TEXT,
 		model_mappings TEXT,
 		use_native_response BOOLEAN NOT NULL DEFAULT FALSE,
+		use_responses_api BOOLEAN NOT NULL DEFAULT FALSE,
 		rpm_limit INTEGER NOT NULL DEFAULT 0,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -348,6 +351,17 @@ func (gdb *GroupsDB) initTablesPostgres() error {
 	if _, err := gdb.exec(createKeysTable); err != nil {
 		return fmt.Errorf("failed to create provider_api_keys table: %w", err)
 	}
+
+	// Best-effort migrations for existing Postgres deployments
+	migrations := []string{
+		`ALTER TABLE provider_groups ADD COLUMN IF NOT EXISTS use_responses_api BOOLEAN NOT NULL DEFAULT FALSE;`,
+	}
+	for _, migration := range migrations {
+		if _, err := gdb.exec(migration); err != nil {
+			return fmt.Errorf("failed to execute migration '%s': %w", migration, err)
+		}
+	}
+
 	for _, indexSQL := range createIndexes {
 		if _, err := gdb.exec(indexSQL); err != nil {
 			return fmt.Errorf("failed to create index: %w", err)
@@ -531,6 +545,11 @@ func (gdb *GroupsDB) migrateNewFields() error {
 		migrations = append(migrations, "ALTER TABLE provider_groups ADD COLUMN use_native_response BOOLEAN NOT NULL DEFAULT 0;")
 	}
 
+	// 检查并添加use_responses_api字段
+	if !existingColumns["use_responses_api"] {
+		migrations = append(migrations, "ALTER TABLE provider_groups ADD COLUMN use_responses_api BOOLEAN NOT NULL DEFAULT 0;")
+	}
+
 	// 检查并添加rpm_limit字段
 	if !existingColumns["rpm_limit"] {
 		migrations = append(migrations, "ALTER TABLE provider_groups ADD COLUMN rpm_limit INTEGER NOT NULL DEFAULT 0;")
@@ -671,8 +690,8 @@ func (gdb *GroupsDB) SaveGroup(groupID string, group *UserGroup) error {
 	INSERT INTO provider_groups (
 		group_id, name, provider_type, base_url, enabled,
 		timeout_seconds, max_retries, rotation_strategy, models, headers, request_params, model_mappings,
-		use_native_response, rpm_limit, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		use_native_response, use_responses_api, rpm_limit, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 	ON CONFLICT(group_id) DO UPDATE SET
 		name = excluded.name,
 		provider_type = excluded.provider_type,
@@ -686,6 +705,7 @@ func (gdb *GroupsDB) SaveGroup(groupID string, group *UserGroup) error {
 		request_params = excluded.request_params,
 		model_mappings = excluded.model_mappings,
 		use_native_response = excluded.use_native_response,
+		use_responses_api = excluded.use_responses_api,
 		rpm_limit = excluded.rpm_limit,
 		updated_at = CURRENT_TIMESTAMP;`
 
@@ -693,7 +713,7 @@ func (gdb *GroupsDB) SaveGroup(groupID string, group *UserGroup) error {
 		groupID, group.Name, group.ProviderType, group.BaseURL,
 		group.Enabled, int(group.Timeout.Seconds()), group.MaxRetries,
 		group.RotationStrategy, string(modelsJSON), string(headersJSON), string(requestParamsJSON), string(modelMappingsJSON),
-		group.UseNativeResponse, group.RPMLimit)
+		group.UseNativeResponse, group.UseResponsesAPI, group.RPMLimit)
 	if err != nil {
 		return fmt.Errorf("failed to save group: %w", err)
 	}
@@ -725,7 +745,7 @@ func (gdb *GroupsDB) LoadGroup(groupID string) (*UserGroup, error) {
 	groupSQL := `
 	SELECT name, provider_type, base_url, enabled,
 		   timeout_seconds, max_retries, rotation_strategy, models, headers, request_params, model_mappings,
-		   use_native_response, rpm_limit
+		   use_native_response, use_responses_api, rpm_limit
 	FROM provider_groups WHERE group_id = ?`
 
 	var group UserGroup
@@ -737,7 +757,7 @@ func (gdb *GroupsDB) LoadGroup(groupID string) (*UserGroup, error) {
 		&group.Name, &group.ProviderType, &group.BaseURL,
 		&group.Enabled, &timeoutSeconds, &group.MaxRetries, &group.RotationStrategy,
 		&modelsJSON, &headersJSON, &requestParamsJSON, &modelMappingsJSON,
-		&group.UseNativeResponse, &group.RPMLimit)
+		&group.UseNativeResponse, &group.UseResponsesAPI, &group.RPMLimit)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("group not found: %s", groupID)
@@ -802,7 +822,7 @@ func (gdb *GroupsDB) LoadAllGroups() (map[string]*UserGroup, error) {
 	groupsSQL := `
 	SELECT group_id, name, provider_type, base_url, enabled,
 		   timeout_seconds, max_retries, rotation_strategy, models, headers, request_params, model_mappings,
-		   use_native_response, rpm_limit
+		   use_native_response, use_responses_api, rpm_limit
 	FROM provider_groups ORDER BY created_at DESC`
 
 	rows, err := gdb.query(groupsSQL)
@@ -823,7 +843,7 @@ func (gdb *GroupsDB) LoadAllGroups() (map[string]*UserGroup, error) {
 		err = rows.Scan(&groupID, &group.Name, &group.ProviderType, &group.BaseURL,
 			&group.Enabled, &timeoutSeconds, &group.MaxRetries,
 			&group.RotationStrategy, &modelsJSON, &headersJSON, &requestParamsJSON, &modelMappingsJSON,
-			&group.UseNativeResponse, &group.RPMLimit)
+			&group.UseNativeResponse, &group.UseResponsesAPI, &group.RPMLimit)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan group: %w", err)
 		}
@@ -896,7 +916,7 @@ func (gdb *GroupsDB) GetGroupsWithMetadata() (map[string]map[string]interface{},
 	groupsSQL := `
 	SELECT group_id, name, provider_type, base_url, enabled,
 		   timeout_seconds, max_retries, rotation_strategy, models, headers,
-		   use_native_response, rpm_limit, created_at, updated_at
+		   use_native_response, use_responses_api, rpm_limit, created_at, updated_at
 	FROM provider_groups ORDER BY created_at DESC`
 
 	rows, err := gdb.query(groupsSQL)
@@ -909,13 +929,13 @@ func (gdb *GroupsDB) GetGroupsWithMetadata() (map[string]map[string]interface{},
 
 	for rows.Next() {
 		var groupID, name, providerType, baseURL, rotationStrategy, modelsJSON, headersJSON string
-		var enabled, useNativeResponse bool
+		var enabled, useNativeResponse, useResponsesAPI bool
 		var timeoutSeconds, maxRetries, rpmLimit int
 		var createdAt, updatedAt time.Time
 
 		err = rows.Scan(&groupID, &name, &providerType, &baseURL, &enabled,
 			&timeoutSeconds, &maxRetries, &rotationStrategy, &modelsJSON, &headersJSON,
-			&useNativeResponse, &rpmLimit, &createdAt, &updatedAt)
+			&useNativeResponse, &useResponsesAPI, &rpmLimit, &createdAt, &updatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan group: %w", err)
 		}
@@ -966,6 +986,7 @@ func (gdb *GroupsDB) GetGroupsWithMetadata() (map[string]map[string]interface{},
 			"models":              models,
 			"headers":             headers,
 			"use_native_response": useNativeResponse,
+			"use_responses_api":   useResponsesAPI,
 			"rpm_limit":           rpmLimit,
 			"created_at":          createdAt,
 			"updated_at":          updatedAt,

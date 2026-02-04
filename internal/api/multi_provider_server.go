@@ -140,7 +140,7 @@ func (s *MultiProviderServer) setupMiddleware() {
 	s.router.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Provider-Group")
+		c.Header("Access-Control-Allow-Headers", "Origin, Referer, Content-Type, Authorization, X-Provider-Group, HTTP-Referer, X-Title, Accept, Accept-Language, Priority, Sec-CH-UA, Sec-CH-UA-Mobile, Sec-CH-UA-Platform, Sec-Fetch-Dest, Sec-Fetch-Mode, Sec-Fetch-Site, User-Agent")
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
@@ -1070,12 +1070,13 @@ func (s *MultiProviderServer) handleAvailableModels(c *gin.Context) {
 
 	// 创建提供商配置
 	providerConfig := &providers.ProviderConfig{
-		BaseURL:      group.BaseURL,
-		APIKey:       group.APIKeys[0], // 使用第一个API密钥
-		Timeout:      group.Timeout,
-		MaxRetries:   group.MaxRetries,
-		Headers:      group.Headers,
-		ProviderType: group.ProviderType,
+		BaseURL:         group.BaseURL,
+		APIKey:          group.APIKeys[0], // 使用第一个API密钥
+		Timeout:         group.Timeout,
+		MaxRetries:      group.MaxRetries,
+		Headers:         group.Headers,
+		ProviderType:    group.ProviderType,
+		UseResponsesAPI: group.UseResponsesAPI,
 	}
 
 	// 创建提供商实例
@@ -1376,12 +1377,13 @@ func (s *MultiProviderServer) validateKeyWithRetry(groupID, apiKey, testModel st
 
 		// 创建提供商配置，强制使用300秒超时进行验证
 		providerConfig := &providers.ProviderConfig{
-			BaseURL:      group.BaseURL,
-			APIKey:       apiKey,
-			Timeout:      time.Duration(300) * time.Second, // 强制300秒超时，忽略分组配置
-			MaxRetries:   1,
-			Headers:      group.Headers,
-			ProviderType: group.ProviderType,
+			BaseURL:         group.BaseURL,
+			APIKey:          apiKey,
+			Timeout:         time.Duration(300) * time.Second, // 强制300秒超时，忽略分组配置
+			MaxRetries:      1,
+			Headers:         group.Headers,
+			ProviderType:    group.ProviderType,
+			UseResponsesAPI: group.UseResponsesAPI,
 		}
 
 		log.Printf("📋 提供商配置: BaseURL=%s, ProviderType=%s, Timeout=300s (强制设置)",
@@ -1603,12 +1605,13 @@ func (s *MultiProviderServer) handleKeysStatus(c *gin.Context) {
 
 			// 创建提供商配置
 			providerConfig := &providers.ProviderConfig{
-				BaseURL:      group.BaseURL,
-				APIKey:       apiKey,
-				Timeout:      10 * time.Minute, // 使用10分钟超时
-				MaxRetries:   1,
-				Headers:      group.Headers,
-				ProviderType: group.ProviderType,
+				BaseURL:         group.BaseURL,
+				APIKey:          apiKey,
+				Timeout:         10 * time.Minute, // 使用10分钟超时
+				MaxRetries:      1,
+				Headers:         group.Headers,
+				ProviderType:    group.ProviderType,
+				UseResponsesAPI: group.UseResponsesAPI,
 			}
 
 			// 获取提供商实例
@@ -2524,6 +2527,7 @@ func (s *MultiProviderServer) handleGroupsManage(c *gin.Context) {
 			"request_params":        group.RequestParams,
 			"model_mappings":        group.ModelMappings,
 			"use_native_response":   group.UseNativeResponse,
+			"use_responses_api":     group.UseResponsesAPI,
 			"rpm_limit":             group.RPMLimit,
 			"disable_permanent_ban": group.DisablePermanentBan,
 			"max_error_count":       group.MaxErrorCount,
@@ -2569,6 +2573,7 @@ func (s *MultiProviderServer) handleCreateGroup(c *gin.Context) {
 		RequestParams       map[string]interface{} `json:"request_params"`
 		ModelMappings       map[string]string      `json:"model_mappings"`
 		UseNativeResponse   bool                   `json:"use_native_response"`
+		UseResponsesAPI     bool                   `json:"use_responses_api"`
 		RPMLimit            int                    `json:"rpm_limit"`
 		DisablePermanentBan bool                   `json:"disable_permanent_ban"`
 		MaxErrorCount       int                    `json:"max_error_count"`
@@ -2649,6 +2654,7 @@ func (s *MultiProviderServer) handleCreateGroup(c *gin.Context) {
 		RequestParams:       req.RequestParams,
 		ModelMappings:       req.ModelMappings,
 		UseNativeResponse:   req.UseNativeResponse,
+		UseResponsesAPI:     req.UseResponsesAPI,
 		RPMLimit:            req.RPMLimit,
 		DisablePermanentBan: req.DisablePermanentBan,
 		MaxErrorCount:       req.MaxErrorCount,
@@ -2712,6 +2718,7 @@ func (s *MultiProviderServer) handleUpdateGroup(c *gin.Context) {
 		RequestParams       map[string]interface{} `json:"request_params"`
 		ModelMappings       map[string]string      `json:"model_mappings"`
 		UseNativeResponse   *bool                  `json:"use_native_response"`
+		UseResponsesAPI     *bool                  `json:"use_responses_api"`
 		RPMLimit            *int                   `json:"rpm_limit"`
 		DisablePermanentBan *bool                  `json:"disable_permanent_ban"`
 		MaxErrorCount       *int                   `json:"max_error_count"`
@@ -2785,6 +2792,9 @@ func (s *MultiProviderServer) handleUpdateGroup(c *gin.Context) {
 	if req.UseNativeResponse != nil {
 		existingGroup.UseNativeResponse = *req.UseNativeResponse
 	}
+	if req.UseResponsesAPI != nil {
+		existingGroup.UseResponsesAPI = *req.UseResponsesAPI
+	}
 	if req.RPMLimit != nil {
 		existingGroup.RPMLimit = *req.RPMLimit
 	}
@@ -2806,6 +2816,9 @@ func (s *MultiProviderServer) handleUpdateGroup(c *gin.Context) {
 		})
 		return
 	}
+
+	// 清理该分组的已缓存提供商实例，使配置变更立即生效
+	s.proxy.RemoveProvider(groupID)
 
 	// 更新密钥管理器
 	if err := s.keyManager.UpdateGroupConfig(groupID, existingGroup); err != nil {

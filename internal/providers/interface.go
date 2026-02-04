@@ -298,13 +298,14 @@ type StreamResponse struct {
 
 // ProviderConfig 提供商配置
 type ProviderConfig struct {
-	BaseURL       string
-	APIKey        string
-	Timeout       time.Duration
-	MaxRetries    int
-	Headers       map[string]string
-	ProviderType  string
-	RequestParams map[string]interface{} // JSON请求参数覆盖
+	BaseURL         string
+	APIKey          string
+	Timeout         time.Duration
+	MaxRetries      int
+	Headers         map[string]string
+	ProviderType    string
+	RequestParams   map[string]interface{} // JSON请求参数覆盖
+	UseResponsesAPI bool                   // OpenAI: use /v1/responses instead of /v1/chat/completions
 }
 
 // Provider 提供商接口
