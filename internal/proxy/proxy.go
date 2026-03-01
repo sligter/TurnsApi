@@ -480,7 +480,6 @@ func (p *OpenRouterProxy) handleStreamingRequest(c *gin.Context, req *ChatComple
 	// 流式转发响应
 	hasData := false
 	var responseBuffer strings.Builder
-	lastLines := make([]string, 0, 20) // 保存最后20行用于token提取
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -497,12 +496,7 @@ func (p *OpenRouterProxy) handleStreamingRequest(c *gin.Context, req *ChatComple
 					proxyKeyName, proxyKeyID := p.getProxyKeyInfo(c)
 					providerGroup := p.getProviderGroup(c, req.Model)
 					clientIP := logger.GetClientIP(c)
-					// 构建完整响应用于日志
-					fullResponse := responseBuffer.String()
-					for _, lastLine := range lastLines {
-						fullResponse += lastLine
-					}
-					p.requestLogger.LogRequest(proxyKeyName, proxyKeyID, providerGroup, apiKey, req.Model, string(reqBody), fullResponse, clientIP, 502, true, time.Since(startTime), err)
+					p.requestLogger.LogRequest(proxyKeyName, proxyKeyID, providerGroup, apiKey, req.Model, string(reqBody), responseBuffer.String(), clientIP, 502, true, time.Since(startTime), err)
 				}
 				return false
 			}
@@ -518,22 +512,9 @@ func (p *OpenRouterProxy) handleStreamingRequest(c *gin.Context, req *ChatComple
 			w.Write([]byte(line))
 			flusher.Flush()
 
-			// 收集响应数据用于日志记录
-			if responseBuffer.Len() < 5000 { // 减少前面内容的记录
-				responseBuffer.WriteString(line)
-			}
-
-			// 保存最后的行，用于token提取
-			lastLines = append(lastLines, line)
-			if len(lastLines) > 20 {
-				lastLines = lastLines[1:] // 保持最后20行
-			}
+			// 收集完整流式响应用于日志记录，便于后台查看详情
+			responseBuffer.WriteString(line)
 		}
-	}
-
-	// 将最后的行添加到响应缓冲区，确保包含token信息
-	for _, lastLine := range lastLines {
-		responseBuffer.WriteString(lastLine)
 	}
 
 	duration := time.Since(startTime)

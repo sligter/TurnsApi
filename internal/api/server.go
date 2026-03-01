@@ -191,6 +191,8 @@ func (s *Server) setupRoutes() {
 		admin.GET("/available-models", s.handleAvailableModels)
 		// 请求日志管理
 		admin.GET("/logs", s.handleRequestLogs)
+		admin.GET("/logs/filters", s.handleLogFilterOptions)
+		admin.GET("/logs/stats/filters", s.handleLogFilterOptions)
 		admin.GET("/logs/:id", s.handleRequestLogDetail)
 		admin.GET("/logs/stats/api-keys", s.handleAPIKeyStats)
 		admin.GET("/logs/stats/models", s.handleModelStats)
@@ -753,8 +755,6 @@ func (s *Server) handleRequestLogs(c *gin.Context) {
 	}
 
 	// 解析查询参数
-	proxyKeyName := c.Query("proxy_key_name")
-	providerGroup := c.Query("provider_group")
 	limitStr := c.DefaultQuery("limit", "50")
 	offsetStr := c.DefaultQuery("offset", "0")
 
@@ -768,8 +768,18 @@ func (s *Server) handleRequestLogs(c *gin.Context) {
 		offset = 0
 	}
 
+	filter := &logger.LogFilter{
+		ProxyKeyName:  c.Query("proxy_key_name"),
+		ProviderGroup: c.Query("provider_group"),
+		Model:         c.Query("model"),
+		Status:        c.Query("status"),
+		Stream:        c.Query("stream"),
+		Limit:         limit,
+		Offset:        offset,
+	}
+
 	// 获取日志列表
-	logs, err := s.requestLogger.GetRequestLogs(proxyKeyName, providerGroup, limit, offset)
+	logs, err := s.requestLogger.GetRequestLogsWithFilter(filter)
 	if err != nil {
 		log.Printf("Failed to get request logs: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -780,7 +790,7 @@ func (s *Server) handleRequestLogs(c *gin.Context) {
 	}
 
 	// 获取总数
-	totalCount, err := s.requestLogger.GetRequestCount(proxyKeyName, providerGroup)
+	totalCount, err := s.requestLogger.GetRequestCountWithFilter(filter)
 	if err != nil {
 		log.Printf("Failed to get request count: %v", err)
 		totalCount = 0
@@ -795,6 +805,32 @@ func (s *Server) handleRequestLogs(c *gin.Context) {
 	})
 }
 
+// handleLogFilterOptions 获取请求日志筛选项（全量去重）
+func (s *Server) handleLogFilterOptions(c *gin.Context) {
+	if s.requestLogger == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Request logging is not available",
+			"code":  "logging_unavailable",
+		})
+		return
+	}
+
+	options, err := s.requestLogger.GetLogFilterOptions()
+	if err != nil {
+		log.Printf("Failed to get log filter options: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to get log filter options",
+			"code":  "get_filter_options_failed",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"options": options,
+	})
+}
+
 // handleRequestLogDetail 获取请求日志详情
 func (s *Server) handleRequestLogDetail(c *gin.Context) {
 	if s.requestLogger == nil {
@@ -806,6 +842,12 @@ func (s *Server) handleRequestLogDetail(c *gin.Context) {
 	}
 
 	idStr := c.Param("id")
+	// 兼容兜底：部分路由匹配情况下，/logs/filters 可能被 /logs/:id 捕获
+	if idStr == "filters" {
+		s.handleLogFilterOptions(c)
+		return
+	}
+
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{

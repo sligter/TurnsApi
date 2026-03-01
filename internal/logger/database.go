@@ -835,6 +835,50 @@ func (d *Database) GetRequestCountWithFilter(filter *LogFilter) (int64, error) {
 	return count, nil
 }
 
+// GetLogFilterOptions 获取请求日志筛选项（全量去重）
+func (d *Database) GetLogFilterOptions() (*LogFilterOptions, error) {
+	options := &LogFilterOptions{
+		ProxyKeys:      make([]string, 0),
+		ProviderGroups: make([]string, 0),
+		Models:         make([]string, 0),
+	}
+
+	fetchDistinctValues := func(column string, dst *[]string) error {
+		query := fmt.Sprintf(
+			"SELECT DISTINCT %s FROM request_logs WHERE %s IS NOT NULL AND TRIM(%s) != '' ORDER BY %s ASC",
+			column, column, column, column,
+		)
+
+		rows, err := d.query(query)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var value string
+			if err := rows.Scan(&value); err != nil {
+				return err
+			}
+			*dst = append(*dst, value)
+		}
+
+		return rows.Err()
+	}
+
+	if err := fetchDistinctValues("proxy_key_name", &options.ProxyKeys); err != nil {
+		return nil, fmt.Errorf("failed to query proxy key filter options: %w", err)
+	}
+	if err := fetchDistinctValues("provider_group", &options.ProviderGroups); err != nil {
+		return nil, fmt.Errorf("failed to query provider group filter options: %w", err)
+	}
+	if err := fetchDistinctValues("model", &options.Models); err != nil {
+		return nil, fmt.Errorf("failed to query model filter options: %w", err)
+	}
+
+	return options, nil
+}
+
 // GetRequestLogDetail 获取请求日志详情
 func (d *Database) GetRequestLogDetail(id int64) (*RequestLog, error) {
 	query := `

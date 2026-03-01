@@ -99,6 +99,15 @@ type LogFilter struct {
 }
 
 // TotalTokensStats 总token数统计结构
+// LogFilterOptions 请求日志筛选项（全量去重）
+// LogFilterOptions requests log filter options (deduplicated across all data).
+type LogFilterOptions struct {
+	ProxyKeys      []string `json:"proxy_keys"`
+	ProviderGroups []string `json:"provider_groups"`
+	Models         []string `json:"models"`
+}
+
+// TotalTokensStats total token usage stats.
 type TotalTokensStats struct {
 	TotalTokens     int64 `json:"total_tokens"`
 	SuccessTokens   int64 `json:"success_tokens"`

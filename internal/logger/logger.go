@@ -221,6 +221,11 @@ func (r *RequestLogger) GetRequestCountWithFilter(filter *LogFilter) (int64, err
 	return r.db.GetRequestCountWithFilter(filter)
 }
 
+// GetLogFilterOptions 获取全量筛选项（去重）
+func (r *RequestLogger) GetLogFilterOptions() (*LogFilterOptions, error) {
+	return r.db.GetLogFilterOptions()
+}
+
 // GetRequestLogDetail 获取请求日志详情
 func (r *RequestLogger) GetRequestLogDetail(id int64) (*RequestLog, error) {
 	return r.db.GetRequestLogDetail(id)
