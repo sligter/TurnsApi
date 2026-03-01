@@ -510,6 +510,160 @@ func (m *Manager) UpdateKeyWithConfig(id string, name, description string, isAct
 }
 
 // SelectGroupForKey 为指定的代理密钥选择分组
+// RemoveGroupFromAllKeys removes a deleted group from all proxy key permissions.
+// It updates in-memory data, group selectors, and persists changes to database.
+// If a key had explicit group permissions and becomes empty after removal, the key is disabled
+// to avoid unintentionally expanding permission to "all groups".
+func (m *Manager) RemoveGroupFromAllKeys(groupID string) (updatedCount int, disabledCount int, err error) {
+	if groupID == "" {
+		return 0, 0, nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for keyID, key := range m.keys {
+		// Empty allowed groups means "all groups"; this key has no explicit reference to groupID.
+		if len(key.AllowedGroups) == 0 {
+			continue
+		}
+
+		filteredGroups, removed := removeGroupFromList(key.AllowedGroups, groupID)
+		if !removed {
+			continue
+		}
+
+		key.AllowedGroups = filteredGroups
+		key.GroupSelectionConfig = sanitizeGroupSelectionConfig(filteredGroups, key.GroupSelectionConfig)
+
+		// Explicit permissions became empty after group deletion: disable key for safety.
+		if len(filteredGroups) == 0 && key.IsActive {
+			key.IsActive = false
+			key.GroupSelectionConfig = nil
+			disabledCount++
+		}
+
+		if err := m.persistKeyLocked(key); err != nil {
+			return updatedCount, disabledCount, err
+		}
+
+		m.refreshSelectorLocked(keyID, key)
+		updatedCount++
+	}
+
+	return updatedCount, disabledCount, nil
+}
+
+func removeGroupFromList(groups []string, target string) ([]string, bool) {
+	if len(groups) == 0 {
+		return groups, false
+	}
+
+	filtered := make([]string, 0, len(groups))
+	removed := false
+	for _, g := range groups {
+		if g == target {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, g)
+	}
+	return filtered, removed
+}
+
+func sanitizeGroupSelectionConfig(allowedGroups []string, cfg *GroupSelectionConfig) *GroupSelectionConfig {
+	if len(allowedGroups) <= 1 || cfg == nil {
+		return nil
+	}
+
+	sanitized := &GroupSelectionConfig{
+		Strategy: cfg.Strategy,
+	}
+	if sanitized.Strategy == "" {
+		sanitized.Strategy = GroupSelectionRoundRobin
+	}
+
+	if sanitized.Strategy != GroupSelectionWeighted {
+		return sanitized
+	}
+
+	allowedSet := make(map[string]struct{}, len(allowedGroups))
+	for _, groupID := range allowedGroups {
+		allowedSet[groupID] = struct{}{}
+	}
+
+	for _, weight := range cfg.GroupWeights {
+		if _, ok := allowedSet[weight.GroupID]; !ok {
+			continue
+		}
+		if weight.Weight <= 0 {
+			continue
+		}
+		sanitized.GroupWeights = append(sanitized.GroupWeights, weight)
+	}
+
+	// Keep weighted strategy valid by providing default weights for missing groups.
+	if len(sanitized.GroupWeights) == 0 {
+		for _, groupID := range allowedGroups {
+			sanitized.GroupWeights = append(sanitized.GroupWeights, GroupWeight{
+				GroupID: groupID,
+				Weight:  1,
+			})
+		}
+	}
+
+	return sanitized
+}
+
+func (m *Manager) persistKeyLocked(key *ProxyKey) error {
+	if m.requestLogger == nil {
+		return nil
+	}
+
+	var groupSelectionConfigJSON string
+	if key.GroupSelectionConfig != nil {
+		configBytes, err := json.Marshal(key.GroupSelectionConfig)
+		if err != nil {
+			return fmt.Errorf("failed to marshal group selection config: %w", err)
+		}
+		groupSelectionConfigJSON = string(configBytes)
+	}
+
+	dbKey := &logger.ProxyKey{
+		ID:                   key.ID,
+		Name:                 key.Name,
+		Description:          key.Description,
+		Key:                  key.Key,
+		AllowedGroups:        key.AllowedGroups,
+		GroupSelectionConfig: groupSelectionConfigJSON,
+		IsActive:             key.IsActive,
+		UsageCount:           key.UsageCount,
+		CreatedAt:            key.CreatedAt,
+		UpdatedAt:            time.Now(),
+	}
+
+	if err := m.requestLogger.UpdateProxyKey(dbKey); err != nil {
+		return fmt.Errorf("failed to update proxy key in database: %w", err)
+	}
+
+	return nil
+}
+
+func (m *Manager) refreshSelectorLocked(keyID string, key *ProxyKey) {
+	if len(key.AllowedGroups) <= 1 || !key.IsActive {
+		delete(m.groupSelectors, keyID)
+		return
+	}
+
+	if selector, exists := m.groupSelectors[keyID]; exists {
+		selector.UpdateAllowedGroups(key.AllowedGroups)
+		selector.UpdateConfig(key.GroupSelectionConfig)
+		return
+	}
+
+	m.groupSelectors[keyID] = NewGroupSelector(key.AllowedGroups, key.GroupSelectionConfig)
+}
+
 func (m *Manager) SelectGroupForKey(keyID string) (string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

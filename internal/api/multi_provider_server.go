@@ -2878,6 +2878,19 @@ func (s *MultiProviderServer) handleDeleteGroup(c *gin.Context) {
 		log.Printf("警告: 删除分组 %s 时更新密钥管理器失败: %v", groupID, err)
 	}
 
+	// 同步清理代理密钥中的分组权限
+	updatedProxyKeys := 0
+	disabledProxyKeys := 0
+	if s.proxyKeyManager != nil {
+		updatedCount, disabledCount, err := s.proxyKeyManager.RemoveGroupFromAllKeys(groupID)
+		if err != nil {
+			log.Printf("警告: 删除分组 %s 时同步代理密钥权限失败: %v", groupID, err)
+		} else {
+			updatedProxyKeys = updatedCount
+			disabledProxyKeys = disabledCount
+		}
+	}
+
 	// 从健康检查器中移除分组
 	s.healthChecker.RemoveGroup(groupID)
 
@@ -2885,8 +2898,11 @@ func (s *MultiProviderServer) handleDeleteGroup(c *gin.Context) {
 	s.proxy.RemoveProvider(groupID)
 
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Group deleted successfully",
+		"success":                true,
+		"message":                "Group deleted successfully",
+		"updated_proxy_keys":     updatedProxyKeys,
+		"disabled_proxy_keys":    disabledProxyKeys,
+		"deleted_provider_group": groupID,
 	})
 }
 
