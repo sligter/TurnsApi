@@ -425,7 +425,7 @@ func (p *MultiProviderProxy) HandleChatCompletion(c *gin.Context) {
 
 	// 使用智能路由重试机制
 	success := p.handleRequestWithRetry(c, &req, routeReq, startTime)
-	if !success {
+	if !success && !c.Writer.Written() {
 		// 如果所有重试都失败了，返回错误
 		c.JSON(http.StatusBadGateway, gin.H{
 			"error": gin.H{
@@ -893,14 +893,6 @@ func (p *MultiProviderProxy) handleNonStreamingRequest(
 			clientIP := logger.GetClientIP(c)
 			p.requestLogger.LogRequest(proxyKeyName, proxyKeyID, routeResult.GroupID, apiKey, req.Model, string(reqBody), "", clientIP, 502, false, time.Since(startTime), err)
 		}
-
-		c.JSON(http.StatusBadGateway, gin.H{
-			"error": gin.H{
-				"message": "Failed to connect to provider",
-				"type":    "connection_error",
-				"code":    "upstream_error",
-			},
-		})
 		return false
 	}
 
@@ -961,12 +953,6 @@ func (p *MultiProviderProxy) handleStreamingRequest(
 	originalModel := req.Model
 	req.Model = p.providerRouter.ResolveModelName(req.Model, routeResult.GroupID)
 
-	// 设置流式响应头
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("Access-Control-Allow-Origin", "*")
-
 	// 根据配置选择流式响应类型
 	var streamChan <-chan providers.StreamResponse
 	var err error
@@ -992,14 +978,6 @@ func (p *MultiProviderProxy) handleStreamingRequest(
 			clientIP := logger.GetClientIP(c)
 			p.requestLogger.LogRequest(proxyKeyName, proxyKeyID, routeResult.GroupID, apiKey, req.Model, string(reqBody), "", clientIP, 502, true, time.Since(startTime), err)
 		}
-
-		c.JSON(http.StatusBadGateway, gin.H{
-			"error": gin.H{
-				"message": "Failed to connect to provider",
-				"type":    "connection_error",
-				"code":    "upstream_error",
-			},
-		})
 		return false
 	}
 
@@ -1008,17 +986,12 @@ func (p *MultiProviderProxy) handleStreamingRequest(
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		log.Printf("Streaming not supported")
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": gin.H{
-				"message": "Streaming not supported",
-				"type":    "internal_error",
-			},
-		})
 		return false
 	}
 
 	// 处理流式数据
 	hasData := false
+	headersWritten := false
 	responseBuffer := make([]byte, 0, 1024)
 
 	for streamResp := range streamChan {
@@ -1029,6 +1002,14 @@ func (p *MultiProviderProxy) handleStreamingRequest(
 		}
 
 		if len(streamResp.Data) > 0 {
+			if !headersWritten {
+				c.Header("Content-Type", "text/event-stream")
+				c.Header("Cache-Control", "no-cache")
+				c.Header("Connection", "keep-alive")
+				c.Header("Access-Control-Allow-Origin", "*")
+				headersWritten = true
+			}
+
 			hasData = true
 			w.Write(streamResp.Data)
 			flusher.Flush()
