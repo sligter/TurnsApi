@@ -752,7 +752,7 @@ func (s *MultiProviderServer) applyModelMappings(models []map[string]interface{}
 		}
 
 		if len(aliases) > 0 {
-			// 如果有别名，优先显示别名，隐藏原始模型
+			// 如果有别名，为每个别名创建条目
 			for _, alias := range aliases {
 				aliasModel := make(map[string]interface{})
 				for k, v := range model {
@@ -763,6 +763,15 @@ func (s *MultiProviderServer) applyModelMappings(models []map[string]interface{}
 				aliasModel["is_alias"] = true
 				enhancedModels = append(enhancedModels, aliasModel)
 			}
+
+			// 同时保留原始模型
+			originalModel := make(map[string]interface{})
+			for k, v := range model {
+				originalModel[k] = v
+			}
+			originalModel["has_aliases"] = aliases
+			originalModel["is_original"] = true
+			enhancedModels = append(enhancedModels, originalModel)
 		} else {
 			// 没有别名的模型直接添加
 			enhancedModels = append(enhancedModels, model)
