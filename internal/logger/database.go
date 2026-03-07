@@ -532,37 +532,45 @@ func (d *Database) migrateDatabase() error {
 
 // migrate 执行数据库迁移
 func (d *Database) migrate() error {
-	if d.dialect == "postgres" {
-		return nil
-	}
+	if d.dialect != "postgres" {
+		// 检查是否需要添加provider_group字段
+		var columnExists bool
+		err := d.queryRow(`
+			SELECT COUNT(*) > 0
+			FROM pragma_table_info('request_logs')
+			WHERE name = 'provider_group'
+		`).Scan(&columnExists)
 
-	// 检查是否需要添加provider_group字段
-	var columnExists bool
-	err := d.queryRow(`
-		SELECT COUNT(*) > 0
-		FROM pragma_table_info('request_logs')
-		WHERE name = 'provider_group'
-	`).Scan(&columnExists)
-
-	if err != nil {
-		return fmt.Errorf("failed to check provider_group column: %w", err)
-	}
-
-	// 如果字段不存在，添加它
-	if !columnExists {
-		log.Printf("Adding provider_group column to request_logs table...")
-		_, err = d.exec(`ALTER TABLE request_logs ADD COLUMN provider_group TEXT NOT NULL DEFAULT ''`)
 		if err != nil {
-			return fmt.Errorf("failed to add provider_group column: %w", err)
+			return fmt.Errorf("failed to check provider_group column: %w", err)
 		}
 
-		// 添加索引
-		_, err = d.exec(`CREATE INDEX IF NOT EXISTS idx_request_logs_provider_group ON request_logs(provider_group)`)
-		if err != nil {
-			return fmt.Errorf("failed to create provider_group index: %w", err)
-		}
+		// 如果字段不存在，添加它
+		if !columnExists {
+			log.Printf("Adding provider_group column to request_logs table...")
+			_, err = d.exec(`ALTER TABLE request_logs ADD COLUMN provider_group TEXT NOT NULL DEFAULT ''`)
+			if err != nil {
+				return fmt.Errorf("failed to add provider_group column: %w", err)
+			}
 
-		log.Printf("Successfully added provider_group column and index")
+			// 添加索引
+			_, err = d.exec(`CREATE INDEX IF NOT EXISTS idx_request_logs_provider_group ON request_logs(provider_group)`)
+			if err != nil {
+				return fmt.Errorf("failed to create provider_group index: %w", err)
+			}
+
+			log.Printf("Successfully added provider_group column and index")
+		}
+	}
+
+	if err := d.ensureAnalyticsTables(); err != nil {
+		return err
+	}
+	if err := d.ensureLargeDatasetIndexes(); err != nil {
+		return err
+	}
+	if err := d.rebuildStatsTablesIfNeeded(); err != nil {
+		return err
 	}
 
 	return nil
@@ -585,25 +593,40 @@ func (d *Database) InsertRequestLog(log *RequestLog) error {
 		log.HasToolCalls, log.ToolCallsCount, log.ToolNames,
 	}
 
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin request log transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
 	if d.dialect == "postgres" {
 		returningQuery := strings.TrimSpace(query) + " RETURNING id"
-		if err := d.queryRow(returningQuery, args...).Scan(&log.ID); err != nil {
+		if err := tx.QueryRow(d.rebind(returningQuery), args...).Scan(&log.ID); err != nil {
 			return fmt.Errorf("failed to insert request log: %w", err)
 		}
-		return nil
+	} else {
+		result, err := tx.Exec(d.rebind(query), args...)
+		if err != nil {
+			return fmt.Errorf("failed to insert request log: %w", err)
+		}
+
+		id, err := result.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("failed to get last insert id: %w", err)
+		}
+		log.ID = id
 	}
 
-	result, err := d.exec(query, args...)
-	if err != nil {
-		return fmt.Errorf("failed to insert request log: %w", err)
+	if err := d.applyStatsUpdates(tx, []*RequestLog{log}); err != nil {
+		return err
 	}
 
-	id, err := result.LastInsertId()
-	if err != nil {
-		return fmt.Errorf("failed to get last insert id: %w", err)
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit request log transaction: %w", err)
 	}
 
-	log.ID = id
 	return nil
 }
 
@@ -643,6 +666,10 @@ func (d *Database) InsertRequestLogsBatch(logs []*RequestLog) error {
 		); err != nil {
 			return fmt.Errorf("failed to exec batch insert: %w", err)
 		}
+	}
+
+	if err := d.applyStatsUpdates(tx, logs); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -784,6 +811,12 @@ func (d *Database) GetRequestLogsWithFilter(filter *LogFilter) ([]*RequestLogSum
 
 // GetRequestCountWithFilter 根据筛选条件获取请求总数
 func (d *Database) GetRequestCountWithFilter(filter *LogFilter) (int64, error) {
+	if d.canUseAggregateStats(filter) {
+		if count, err := d.getRequestCountFromDaily(filter); err == nil {
+			return count, nil
+		}
+	}
+
 	var query string
 	var args []interface{}
 	var conditions []string
@@ -837,6 +870,10 @@ func (d *Database) GetRequestCountWithFilter(filter *LogFilter) (int64, error) {
 
 // GetLogFilterOptions 获取请求日志筛选项（全量去重）
 func (d *Database) GetLogFilterOptions() (*LogFilterOptions, error) {
+	if options, err := d.getLogFilterOptionsFromDaily(); err == nil {
+		return options, nil
+	}
+
 	options := &LogFilterOptions{
 		ProxyKeys:      make([]string, 0),
 		ProviderGroups: make([]string, 0),
@@ -908,6 +945,10 @@ func (d *Database) GetRequestLogDetail(id int64) (*RequestLog, error) {
 
 // GetProxyKeyStats 获取代理密钥统计
 func (d *Database) GetProxyKeyStats() ([]*ProxyKeyStats, error) {
+	if stats, err := d.getProxyKeyStatsFromDaily(); err == nil {
+		return stats, nil
+	}
+
 	query := `
 	SELECT
 		proxy_key_name,
@@ -946,41 +987,17 @@ func (d *Database) GetProxyKeyStats() ([]*ProxyKeyStats, error) {
 
 // GetModelStats 获取模型统计
 func (d *Database) GetModelStats() ([]*ModelStats, error) {
-	query := `
-	SELECT
-		model,
-		COUNT(*) as total_requests,
-		SUM(tokens_used) as total_tokens,
-		AVG(duration) as avg_duration
-	FROM request_logs
-	WHERE status_code = 200
-	GROUP BY model
-	ORDER BY total_requests DESC
-	`
-
-	rows, err := d.query(query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query model stats: %w", err)
-	}
-	defer rows.Close()
-
-	var stats []*ModelStats
-	for rows.Next() {
-		stat := &ModelStats{}
-		err := rows.Scan(
-			&stat.Model, &stat.TotalRequests, &stat.TotalTokens, &stat.AvgDuration,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan model stats: %w", err)
-		}
-		stats = append(stats, stat)
-	}
-
-	return stats, nil
+	return d.GetModelStatsWithFilter(nil)
 }
 
 // GetModelStatsWithFilter 基于筛选与时间范围的模型统计
 func (d *Database) GetModelStatsWithFilter(filter *LogFilter) ([]*ModelStats, error) {
+	if d.canUseAggregateStats(filter) {
+		if stats, err := d.getModelStatsFromDaily(filter); err == nil {
+			return stats, nil
+		}
+	}
+
 	var (
 		conds []string
 		args  []interface{}
@@ -1056,6 +1073,10 @@ func (d *Database) GetModelStatsWithFilter(filter *LogFilter) ([]*ModelStats, er
 
 // GetTotalTokensStats 获取总token数统计
 func (d *Database) GetTotalTokensStats() (*TotalTokensStats, error) {
+	if stats, err := d.getGlobalStats(); err == nil {
+		return stats, nil
+	}
+
 	query := `
 	SELECT
 		SUM(tokens_used) as total_tokens,
@@ -1078,6 +1099,19 @@ func (d *Database) GetTotalTokensStats() (*TotalTokensStats, error) {
 
 // GetRequestCount 获取请求总数
 func (d *Database) GetRequestCount(proxyKeyName, providerGroup string) (int64, error) {
+	filter := &LogFilter{
+		ProxyKeyName:  proxyKeyName,
+		ProviderGroup: providerGroup,
+	}
+	if proxyKeyName == "" && providerGroup == "" {
+		if stats, err := d.getGlobalStats(); err == nil {
+			return stats.TotalRequests, nil
+		}
+	}
+	if count, err := d.getRequestCountFromDaily(filter); err == nil {
+		return count, nil
+	}
+
 	var query string
 	var args []interface{}
 	var conditions []string
@@ -1310,6 +1344,11 @@ func (d *Database) CleanupOldLogs(retentionDays int) error {
 	}
 
 	log.Printf("Cleaned up %d old log records", rowsAffected)
+	if rowsAffected > 0 {
+		if err := d.rebuildStatsTables(); err != nil {
+			return fmt.Errorf("failed to rebuild stats after cleanup: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -1339,6 +1378,12 @@ func (d *Database) DeleteRequestLogs(ids []int64) (int64, error) {
 		return 0, fmt.Errorf("failed to get rows affected: %w", err)
 	}
 
+	if rowsAffected > 0 {
+		if err := d.rebuildStatsTables(); err != nil {
+			return 0, fmt.Errorf("failed to rebuild stats after deleting request logs: %w", err)
+		}
+	}
+
 	return rowsAffected, nil
 }
 
@@ -1356,6 +1401,12 @@ func (d *Database) ClearAllRequestLogs() (int64, error) {
 		return 0, fmt.Errorf("failed to get rows affected: %w", err)
 	}
 
+	if rowsAffected > 0 {
+		if err := d.rebuildStatsTables(); err != nil {
+			return 0, fmt.Errorf("failed to rebuild stats after clearing request logs: %w", err)
+		}
+	}
+
 	return rowsAffected, nil
 }
 
@@ -1371,6 +1422,12 @@ func (d *Database) ClearErrorRequestLogs() (int64, error) {
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected > 0 {
+		if err := d.rebuildStatsTables(); err != nil {
+			return 0, fmt.Errorf("failed to rebuild stats after clearing error logs: %w", err)
+		}
 	}
 
 	return rowsAffected, nil
@@ -1507,6 +1564,12 @@ func (d *Database) GetAllRequestLogsForExportWithFilter(filter *LogFilter) ([]*R
 
 // GetStatusStats 基于筛选与时间范围的状态分布聚合
 func (d *Database) GetStatusStats(filter *LogFilter) (*StatusStats, error) {
+	if d.canUseAggregateStats(filter) {
+		if stats, err := d.getStatusStatsFromDaily(filter); err == nil {
+			return stats, nil
+		}
+	}
+
 	var (
 		conds []string
 		args  []interface{}
@@ -1564,6 +1627,12 @@ func (d *Database) GetStatusStats(filter *LogFilter) (*StatusStats, error) {
 
 // GetTokensTimeline 基于筛选与时间范围的tokens时间序列；≤24h按小时，否则按天
 func (d *Database) GetTokensTimeline(filter *LogFilter) ([]*TimelinePoint, error) {
+	if d.canUseAggregateStats(filter) {
+		if points, err := d.getTokensTimelineFromDaily(filter); err == nil {
+			return points, nil
+		}
+	}
+
 	var (
 		conds []string
 		args  []interface{}
@@ -1657,6 +1726,12 @@ func (d *Database) GetTokensTimeline(filter *LogFilter) ([]*TimelinePoint, error
 
 // GetGroupTokensStats 基于筛选与时间范围的分组tokens聚合（按 total desc）
 func (d *Database) GetGroupTokensStats(filter *LogFilter) ([]*GroupTokensStat, error) {
+	if d.canUseAggregateStats(filter) {
+		if stats, err := d.getGroupTokensStatsFromDaily(filter); err == nil {
+			return stats, nil
+		}
+	}
+
 	var (
 		conds []string
 		args  []interface{}

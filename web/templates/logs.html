@@ -171,14 +171,14 @@
                     </button>
                 </div>
             </div>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div class="text-center p-4 bg-blue-50 rounded-lg">
                     <div class="text-2xl font-bold text-blue-600" x-text="totalTokensUsed.toLocaleString()"></div>
                     <div class="text-sm text-gray-600">总Token数</div>
                     <div class="text-xs text-gray-500 mt-1" x-text="getTokenTrend('total')"></div>
                 </div>
-                <div class="text-center p-4 bg-green-50 rounded-lg">
-                    <div class="text-2xl font-bold text-green-600" x-text="successTokensUsed.toLocaleString()"></div>
+                <div class="hidden">
+                    <div class="hidden" x-text="''"></div>
                     <div class="text-sm text-gray-600">成功Token数</div>
                     <div class="text-xs text-gray-500 mt-1" x-text="getTokenTrend('success')"></div>
                 </div>
@@ -722,7 +722,6 @@
                 errorRequests: 0,
                 avgResponseTime: 0,
                 totalTokensUsed: 0,
-                successTokensUsed: 0,
                 avgTokensPerRequest: 0,
                 tokenSuccessRate: 0,
                 proxyKeys: [],
@@ -753,22 +752,29 @@
                 fullscreenChartContent: '',
                 previousStats: {
                     totalTokensUsed: 0,
-                    successTokensUsed: 0,
                     avgTokensPerRequest: 0,
                     tokenSuccessRate: 0
                 },
+                chartData: {
+                    status: { success: 0, error: 0 },
+                    model: { labels: [], counts: [] },
+                    tokenTrend: { labels: [], total: [] },
+                    groupToken: { labels: [], total: [] }
+                },
+                chartUpdateQueued: false,
 
                 async init() {
                     await Promise.all([
                         this.loadLogs(),
                         this.loadFilterOptions(),
                         this.loadStats(),
-                        this.loadTokenStats()
+                        this.loadTokenStats(),
+                        this.loadChartData()
                     ]);
                     // 延迟初始化图表，确保数据已加载和DOM已渲染
-                    setTimeout(() => {
+                    requestAnimationFrame(() => {
                         this.initCharts();
-                    }, 500);
+                    });
                 },
 
                 get totalPages() {
@@ -921,11 +927,12 @@
 
                 async applyFilters() {
                     this.currentPage = 1;
-                    await this.loadLogs();
+                    await Promise.all([
+                        this.loadLogs(),
+                        this.loadChartData()
+                    ]);
                     // 筛选条件变化时也需要更新图表
-                    setTimeout(async () => {
-                        await this.updateCharts();
-                    }, 300);
+                    this.queueChartUpdate();
                 },
 
                 async viewLogDetail(id) {
@@ -949,12 +956,11 @@
                         this.loadLogs(),
                         this.loadFilterOptions(),
                         this.loadStats(),
-                        this.loadTokenStats()
+                        this.loadTokenStats(),
+                        this.loadChartData()
                     ]);
                     // 延迟更新图表，确保数据已加载
-                    setTimeout(() => {
-                        this.updateCharts();
-                    }, 300);
+                    this.queueChartUpdate();
                 },
 
                 async loadTokenStats() {
@@ -962,7 +968,6 @@
                         // 保存之前的统计数据用于趋势计算
                         this.previousStats = {
                             totalTokensUsed: this.totalTokensUsed,
-                            successTokensUsed: this.successTokensUsed,
                             avgTokensPerRequest: this.avgTokensPerRequest,
                             tokenSuccessRate: this.tokenSuccessRate
                         };
@@ -972,9 +977,8 @@
 
                         if (data.success && data.stats) {
                             this.totalTokensUsed = data.stats.total_tokens || 0;
-                            this.successTokensUsed = data.stats.success_tokens || 0;
-                            this.avgTokensPerRequest = data.stats.success_requests > 0 ?
-                                Math.round(this.successTokensUsed / data.stats.success_requests) : 0;
+                            this.avgTokensPerRequest = data.stats.total_requests > 0 ?
+                                Math.round(this.totalTokensUsed / data.stats.total_requests) : 0;
                             this.tokenSuccessRate = data.stats.total_requests > 0 ?
                                 Math.round((data.stats.success_requests / data.stats.total_requests) * 100) : 0;
                         }
@@ -990,10 +994,8 @@
                 // 获取Token趋势
                 getTokenTrend(type) {
                     const current = this[type === 'total' ? 'totalTokensUsed' :
-                                         type === 'success' ? 'successTokensUsed' :
                                          type === 'avg' ? 'avgTokensPerRequest' : 'tokenSuccessRate'];
                     const previous = this.previousStats[type === 'total' ? 'totalTokensUsed' :
-                                                       type === 'success' ? 'successTokensUsed' :
                                                        type === 'avg' ? 'avgTokensPerRequest' : 'tokenSuccessRate'];
                     
                     if (previous === 0) return '';
@@ -1445,10 +1447,7 @@
                     }
                     
                     try {
-                        this.createStatusChart();
-                        this.createModelChart();
-                        this.createTokenTrendChart();
-                        this.createGroupTokenChart();
+                        this.updateCharts();
                     } catch (error) {
                         console.error('Error initializing charts:', error);
                     }
@@ -1456,9 +1455,11 @@
 
                 updateCharts() {
                     // 销毁现有图表实例
-                    this.destroyCharts();
+                    this.createStatusChart();
                     // 重新创建图表
-                    this.initCharts();
+                    this.createModelChart();
+                    this.createTokenTrendChart();
+                    this.createGroupTokenChart();
                 },
 
                 destroyCharts() {
@@ -1470,9 +1471,167 @@
                     });
                 },
 
-                updateChartsWithTimeRange() {
+                queueChartUpdate() {
+                    if (this.chartUpdateQueued) {
+                        return;
+                    }
+                    this.chartUpdateQueued = true;
+                    requestAnimationFrame(() => {
+                        this.chartUpdateQueued = false;
+                        this.updateCharts();
+                    });
+                },
+
+                buildChartQueryParams() {
+                    const params = new URLSearchParams();
+                    if (this.chartTimeRange) params.append('range', this.chartTimeRange);
+                    if (this.filters.proxyKeyName) params.append('proxy_key_name', this.filters.proxyKeyName);
+                    if (this.filters.providerGroup) params.append('provider_group', this.filters.providerGroup);
+                    if (this.filters.model) params.append('model', this.filters.model);
+                    if (this.filters.stream) params.append('stream', this.filters.stream);
+                    return params.toString();
+                },
+
+                async loadChartData() {
+                    const query = this.buildChartQueryParams();
+                    const fetchJson = async (url) => {
+                        try {
+                            const response = await fetch(url);
+                            if (!response.ok) return null;
+                            return await response.json();
+                        } catch (error) {
+                            console.warn(`Failed to load chart data from ${url}:`, error);
+                            return null;
+                        }
+                    };
+
+                    const [statusResult, modelResult, tokenTrendResult, groupTokenResult] = await Promise.all([
+                        fetchJson(`/admin/logs/stats/status?${query}`),
+                        fetchJson(`/admin/logs/stats/models?${query}`),
+                        fetchJson(`/admin/logs/stats/tokens-timeline?${query}`),
+                        fetchJson(`/admin/logs/stats/group-tokens?${query}`)
+                    ]);
+
+                    this.chartData.status = {
+                        success: Number(statusResult?.success && statusResult.data ? statusResult.data.success || 0 : this.successRequests || 0),
+                        error: Number(statusResult?.success && statusResult.data ? statusResult.data.error || 0 : this.errorRequests || 0)
+                    };
+
+                    if (modelResult?.success && Array.isArray(modelResult.stats)) {
+                        const topModels = [...modelResult.stats]
+                            .sort((a, b) => (b.total_requests || 0) - (a.total_requests || 0))
+                            .slice(0, 10);
+                        this.chartData.model = {
+                            labels: topModels.map(stat => stat.model || 'unknown'),
+                            counts: topModels.map(stat => Number(stat.total_requests || 0))
+                        };
+                    } else {
+                        const modelCounts = {};
+                        this.logs.forEach(log => {
+                            const model = log.model || 'unknown';
+                            modelCounts[model] = (modelCounts[model] || 0) + 1;
+                        });
+                        const sortedModels = Object.entries(modelCounts)
+                            .sort(([, a], [, b]) => b - a)
+                            .slice(0, 10);
+                        this.chartData.model = {
+                            labels: sortedModels.map(([model]) => model),
+                            counts: sortedModels.map(([, count]) => count)
+                        };
+                    }
+
+                    if (tokenTrendResult?.success && Array.isArray(tokenTrendResult.data)) {
+                        const timeline = [...tokenTrendResult.data].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+                        this.chartData.tokenTrend = {
+                            labels: timeline.map(point => point.date),
+                            total: timeline.map(point => Number(point.total || 0))
+                        };
+                    } else {
+                        const tokenByDate = {};
+                        this.logs.forEach(log => {
+                            if (log.created_at && log.tokens_used) {
+                                const date = new Date(log.created_at).toISOString().split('T')[0];
+                                if (!tokenByDate[date]) {
+                                    tokenByDate[date] = { total: 0 };
+                                }
+                                tokenByDate[date].total += parseInt(log.tokens_used, 10) || 0;
+                            }
+                        });
+                        const sortedDates = Object.keys(tokenByDate).sort();
+                        this.chartData.tokenTrend = {
+                            labels: sortedDates,
+                            total: sortedDates.map(date => tokenByDate[date].total)
+                        };
+                    }
+
+                    if (groupTokenResult?.success && Array.isArray(groupTokenResult.data)) {
+                        const groups = groupTokenResult.data.slice(0, 10);
+                        this.chartData.groupToken = {
+                            labels: groups.map(group => group.group || '-'),
+                            total: groups.map(group => Number(group.total || 0))
+                        };
+                    } else {
+                        const groupTokens = {};
+                        this.logs.forEach(log => {
+                            if (log.provider_group && log.tokens_used) {
+                                const group = log.provider_group;
+                                if (!groupTokens[group]) {
+                                    groupTokens[group] = { total: 0 };
+                                }
+                                groupTokens[group].total += parseInt(log.tokens_used, 10) || 0;
+                            }
+                        });
+                        const labels = Object.keys(groupTokens).slice(0, 10);
+                        this.chartData.groupToken = {
+                            labels,
+                            total: labels.map(group => groupTokens[group].total)
+                        };
+                    }
+                },
+
+                getChartOptions(extraOptions = {}) {
+                    return {
+                        ...extraOptions,
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        normalized: true,
+                        plugins: {
+                            datalabels: { display: false },
+                            ...(extraOptions.plugins || {})
+                        }
+                    };
+                },
+
+                upsertChart(chartKey, canvasId, type, data, options) {
+                    const canvas = document.getElementById(canvasId);
+                    if (!canvas) return null;
+
+                    const existing = this.chartInstances[chartKey];
+                    if (existing && existing.config?.type === type) {
+                        existing.data = data;
+                        existing.options = options;
+                        existing.update('none');
+                        return existing;
+                    }
+
+                    if (existing) {
+                        existing.destroy();
+                    }
+
+                    const chart = new Chart(canvas.getContext('2d'), {
+                        type,
+                        data,
+                        options
+                    });
+                    this.chartInstances[chartKey] = chart;
+                    return chart;
+                },
+
+                async updateChartsWithTimeRange() {
                     // 根据时间范围更新图表数据
-                    this.updateCharts();
+                    await this.loadChartData();
+                    this.queueChartUpdate();
                 },
 
                 resetAllCharts() {
@@ -2189,6 +2348,314 @@
                             }
                         }
                     });
+                },
+
+                createStatusChart() {
+                    const canvas = document.getElementById('statusChart');
+                    if (!canvas) return;
+
+                    const successCount = Number(this.chartData.status?.success || 0);
+                    const errorCount = Number(this.chartData.status?.error || 0);
+
+                    this.upsertChart('status', 'statusChart', 'doughnut', {
+                        labels: ['成功请求', '失败请求'],
+                        datasets: [{
+                            data: [successCount, errorCount],
+                            backgroundColor: ['#10B981', '#EF4444'],
+                            borderWidth: 2,
+                            borderColor: '#ffffff'
+                        }]
+                    }, this.getChartOptions({
+                        cutout: '62%',
+                        plugins: {
+                            legend: {
+                                position: 'bottom',
+                                labels: {
+                                    padding: 20,
+                                    usePointStyle: true
+                                }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                        const percentage = total > 0 ? ((context.parsed * 100) / total).toFixed(1) : 0;
+                                        return `${context.label}: ${context.parsed} (${percentage}%)`;
+                                    }
+                                }
+                            }
+                        }
+                    }));
+                },
+
+                createModelChart() {
+                    const canvas = document.getElementById('modelChart');
+                    if (!canvas) return;
+
+                    const labels = this.chartData.model?.labels || [];
+                    const data = this.chartData.model?.counts || [];
+
+                    this.upsertChart('model', 'modelChart', 'bar', {
+                        labels,
+                        datasets: [{
+                            label: '使用次数',
+                            data,
+                            backgroundColor: 'rgba(59, 130, 246, 0.8)',
+                            borderColor: 'rgba(59, 130, 246, 1)',
+                            borderWidth: 1,
+                            borderRadius: 6,
+                            maxBarThickness: 32
+                        }]
+                    }, this.getChartOptions({
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                ticks: {
+                                    stepSize: 1
+                                }
+                            },
+                            x: {
+                                ticks: {
+                                    maxRotation: 45,
+                                    minRotation: 20,
+                                    autoSkip: false
+                                }
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                display: false
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        return `使用次数: ${context.parsed.y}`;
+                                    }
+                                }
+                            }
+                        }
+                    }));
+                },
+
+                createTokenTrendChart() {
+                    const canvas = document.getElementById('tokenTrendChart');
+                    if (!canvas) return;
+
+                    const labels = this.chartData.tokenTrend?.labels || [];
+                    const totalTokens = this.chartData.tokenTrend?.total || [];
+                    const successTokens = this.chartData.tokenTrend?.success || [];
+                    const pointRadius = labels.length > 40 ? 0 : 2;
+
+                    this.upsertChart('tokenTrend', 'tokenTrendChart', 'line', {
+                        labels,
+                        datasets: [{
+                            label: '总 Token',
+                            data: totalTokens,
+                            borderColor: 'rgba(59, 130, 246, 1)',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            fill: true,
+                            tension: 0.35
+                        }, {
+                            label: '成功 Token',
+                            data: successTokens,
+                            borderColor: 'rgba(16, 185, 129, 1)',
+                            backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                            fill: true,
+                            tension: 0.35
+                        }]
+                    }, this.getChartOptions({
+                        scales: {
+                            y: {
+                                beginAtZero: true
+                            },
+                            x: {
+                                ticks: {
+                                    autoSkip: true,
+                                    maxTicksLimit: 12
+                                }
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                position: 'top'
+                            }
+                        },
+                        elements: {
+                            point: {
+                                radius: pointRadius,
+                                hoverRadius: pointRadius === 0 ? 3 : 4
+                            },
+                            line: {
+                                borderWidth: 2
+                            }
+                        },
+                        interaction: {
+                            mode: 'index',
+                            intersect: false
+                        },
+                        spanGaps: true
+                    }));
+                },
+
+                createGroupTokenChart() {
+                    const canvas = document.getElementById('groupTokenChart');
+                    if (!canvas) return;
+
+                    const labels = this.chartData.groupToken?.labels || [];
+                    const totalData = this.chartData.groupToken?.total || [];
+                    const successData = this.chartData.groupToken?.success || [];
+
+                    this.upsertChart('groupToken', 'groupTokenChart', 'bar', {
+                        labels,
+                        datasets: [{
+                            label: '总 Token',
+                            data: totalData,
+                            backgroundColor: 'rgba(59, 130, 246, 0.8)',
+                            borderColor: 'rgba(59, 130, 246, 1)',
+                            borderWidth: 1,
+                            borderRadius: 6,
+                            maxBarThickness: 28
+                        }, {
+                            label: '成功 Token',
+                            data: successData,
+                            backgroundColor: 'rgba(16, 185, 129, 0.8)',
+                            borderColor: 'rgba(16, 185, 129, 1)',
+                            borderWidth: 1,
+                            borderRadius: 6,
+                            maxBarThickness: 28
+                        }]
+                    }, this.getChartOptions({
+                        scales: {
+                            y: {
+                                beginAtZero: true
+                            },
+                            x: {
+                                ticks: {
+                                    autoSkip: false,
+                                    maxRotation: 25,
+                                    minRotation: 0
+                                }
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                position: 'top'
+                            }
+                        }
+                    }));
+                },
+
+                exportTokenStats() {
+                    const stats = [
+                        {
+                            '指标': '总 Token 数',
+                            '数值': this.totalTokensUsed,
+                            '趋势': this.getTokenTrend('total')
+                        },
+                        {
+                            '指标': '平均 Token/请求',
+                            '数值': this.avgTokensPerRequest,
+                            '趋势': this.getTokenTrend('avg')
+                        },
+                        {
+                            '指标': '请求成功率',
+                            '数值': this.tokenSuccessRate + '%',
+                            '趋势': this.getTokenTrend('rate')
+                        }
+                    ];
+
+                    this.exportToCSV(stats, 'token_stats');
+                },
+
+                createTokenTrendChart() {
+                    const canvas = document.getElementById('tokenTrendChart');
+                    if (!canvas) return;
+
+                    const labels = this.chartData.tokenTrend?.labels || [];
+                    const totalTokens = this.chartData.tokenTrend?.total || [];
+                    const pointRadius = labels.length > 40 ? 0 : 2;
+
+                    this.upsertChart('tokenTrend', 'tokenTrendChart', 'line', {
+                        labels,
+                        datasets: [{
+                            label: '总 Token',
+                            data: totalTokens,
+                            borderColor: 'rgba(59, 130, 246, 1)',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            fill: true,
+                            tension: 0.35
+                        }]
+                    }, this.getChartOptions({
+                        scales: {
+                            y: {
+                                beginAtZero: true
+                            },
+                            x: {
+                                ticks: {
+                                    autoSkip: true,
+                                    maxTicksLimit: 12
+                                }
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                position: 'top'
+                            }
+                        },
+                        elements: {
+                            point: {
+                                radius: pointRadius,
+                                hoverRadius: pointRadius === 0 ? 3 : 4
+                            },
+                            line: {
+                                borderWidth: 2
+                            }
+                        },
+                        interaction: {
+                            mode: 'index',
+                            intersect: false
+                        },
+                        spanGaps: true
+                    }));
+                },
+
+                createGroupTokenChart() {
+                    const canvas = document.getElementById('groupTokenChart');
+                    if (!canvas) return;
+
+                    const labels = this.chartData.groupToken?.labels || [];
+                    const totalData = this.chartData.groupToken?.total || [];
+
+                    this.upsertChart('groupToken', 'groupTokenChart', 'bar', {
+                        labels,
+                        datasets: [{
+                            label: '总 Token',
+                            data: totalData,
+                            backgroundColor: 'rgba(59, 130, 246, 0.8)',
+                            borderColor: 'rgba(59, 130, 246, 1)',
+                            borderWidth: 1,
+                            borderRadius: 6,
+                            maxBarThickness: 28
+                        }]
+                    }, this.getChartOptions({
+                        scales: {
+                            y: {
+                                beginAtZero: true
+                            },
+                            x: {
+                                ticks: {
+                                    autoSkip: false,
+                                    maxRotation: 25,
+                                    minRotation: 0
+                                }
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                position: 'top'
+                            }
+                        }
+                    }));
                 }
             }
         }

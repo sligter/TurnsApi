@@ -532,3 +532,186 @@ func TestRequestLogSummaryWithToolCalls(t *testing.T) {
 		}
 	}
 }
+
+func TestAggregatedStatsPersistAcrossRestart(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	db, err := NewDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+
+	baseTime := time.Now()
+	logs := []*RequestLog{
+		{
+			ProxyKeyName:  "key-a",
+			ProxyKeyID:    "key-a-id",
+			ProviderGroup: "group-a",
+			OpenRouterKey: "masked-a",
+			Model:         "model-a",
+			RequestBody:   "{}",
+			ResponseBody:  "{}",
+			StatusCode:    200,
+			IsStream:      false,
+			Duration:      120,
+			TokensUsed:    42,
+			ClientIP:      "127.0.0.1",
+			CreatedAt:     baseTime,
+		},
+		{
+			ProxyKeyName:  "key-a",
+			ProxyKeyID:    "key-a-id",
+			ProviderGroup: "group-a",
+			OpenRouterKey: "masked-a",
+			Model:         "model-a",
+			RequestBody:   "{}",
+			ResponseBody:  "{}",
+			StatusCode:    500,
+			IsStream:      false,
+			Duration:      80,
+			TokensUsed:    0,
+			Error:         "boom",
+			ClientIP:      "127.0.0.1",
+			CreatedAt:     baseTime.Add(2 * time.Minute),
+		},
+	}
+
+	for _, row := range logs {
+		if err := db.InsertRequestLog(row); err != nil {
+			t.Fatalf("Failed to insert request log: %v", err)
+		}
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("Failed to close database: %v", err)
+	}
+
+	db, err = NewDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to reopen database: %v", err)
+	}
+	defer db.Close()
+
+	totalStats, err := db.GetTotalTokensStats()
+	if err != nil {
+		t.Fatalf("Failed to get total token stats: %v", err)
+	}
+	if totalStats.TotalRequests != 2 {
+		t.Fatalf("Expected 2 total requests, got %d", totalStats.TotalRequests)
+	}
+	if totalStats.SuccessRequests != 1 {
+		t.Fatalf("Expected 1 success request, got %d", totalStats.SuccessRequests)
+	}
+	if totalStats.TotalTokens != 42 {
+		t.Fatalf("Expected 42 total tokens, got %d", totalStats.TotalTokens)
+	}
+
+	count, err := db.GetRequestCountWithFilter(&LogFilter{})
+	if err != nil {
+		t.Fatalf("Failed to get request count: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("Expected count 2, got %d", count)
+	}
+
+	statusStats, err := db.GetStatusStats(&LogFilter{})
+	if err != nil {
+		t.Fatalf("Failed to get status stats: %v", err)
+	}
+	if statusStats.Success != 1 || statusStats.Error != 1 {
+		t.Fatalf("Expected status stats 1/1, got %d/%d", statusStats.Success, statusStats.Error)
+	}
+
+	proxyStats, err := db.GetProxyKeyStats()
+	if err != nil {
+		t.Fatalf("Failed to get proxy key stats: %v", err)
+	}
+	if len(proxyStats) != 1 || proxyStats[0].TotalRequests != 2 {
+		t.Fatalf("Expected one proxy key stat with 2 requests, got %+v", proxyStats)
+	}
+
+	modelStats, err := db.GetModelStatsWithFilter(nil)
+	if err != nil {
+		t.Fatalf("Failed to get model stats: %v", err)
+	}
+	if len(modelStats) != 1 || modelStats[0].TotalRequests != 1 {
+		t.Fatalf("Expected one model stat with 1 success request, got %+v", modelStats)
+	}
+}
+
+func TestAggregatedStatsRebuildAfterClearErrorLogs(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	db, err := NewDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	now := time.Now()
+	rows := []*RequestLog{
+		{
+			ProxyKeyName:  "key-a",
+			ProxyKeyID:    "key-a-id",
+			ProviderGroup: "group-a",
+			OpenRouterKey: "masked-a",
+			Model:         "model-a",
+			RequestBody:   "{}",
+			ResponseBody:  "{}",
+			StatusCode:    200,
+			IsStream:      false,
+			Duration:      100,
+			TokensUsed:    30,
+			ClientIP:      "127.0.0.1",
+			CreatedAt:     now,
+		},
+		{
+			ProxyKeyName:  "key-b",
+			ProxyKeyID:    "key-b-id",
+			ProviderGroup: "group-b",
+			OpenRouterKey: "masked-b",
+			Model:         "model-b",
+			RequestBody:   "{}",
+			ResponseBody:  "{}",
+			StatusCode:    429,
+			IsStream:      false,
+			Duration:      50,
+			TokensUsed:    0,
+			Error:         "rate limited",
+			ClientIP:      "127.0.0.1",
+			CreatedAt:     now.Add(time.Minute),
+		},
+	}
+
+	for _, row := range rows {
+		if err := db.InsertRequestLog(row); err != nil {
+			t.Fatalf("Failed to insert request log: %v", err)
+		}
+	}
+
+	deleted, err := db.ClearErrorRequestLogs()
+	if err != nil {
+		t.Fatalf("Failed to clear error logs: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("Expected to delete 1 error log, got %d", deleted)
+	}
+
+	totalStats, err := db.GetTotalTokensStats()
+	if err != nil {
+		t.Fatalf("Failed to get total stats after clear: %v", err)
+	}
+	if totalStats.TotalRequests != 1 || totalStats.SuccessRequests != 1 || totalStats.TotalTokens != 30 {
+		t.Fatalf("Unexpected totals after clear: %+v", totalStats)
+	}
+
+	statusStats, err := db.GetStatusStats(&LogFilter{})
+	if err != nil {
+		t.Fatalf("Failed to get status stats after clear: %v", err)
+	}
+	if statusStats.Success != 1 || statusStats.Error != 0 {
+		t.Fatalf("Unexpected status stats after clear: %+v", statusStats)
+	}
+}

@@ -810,6 +810,11 @@ func (s *MultiProviderServer) applyModelMappings(models []map[string]interface{}
 // handleSystemHealth 处理系统健康检查
 func (s *MultiProviderServer) handleSystemHealth(c *gin.Context) {
 	health := s.healthChecker.GetSystemHealth()
+	if s.requestLogger != nil {
+		if stats, err := s.requestLogger.GetTotalTokensStats(); err == nil && stats != nil {
+			health.TotalRequests = stats.TotalRequests
+		}
+	}
 	c.JSON(http.StatusOK, health)
 }
 
@@ -829,6 +834,11 @@ func (s *MultiProviderServer) handleProviderHealth(c *gin.Context) {
 // handleStatus 处理状态查询
 func (s *MultiProviderServer) handleStatus(c *gin.Context) {
 	systemHealth := s.healthChecker.GetSystemHealth()
+	if s.requestLogger != nil {
+		if stats, err := s.requestLogger.GetTotalTokensStats(); err == nil && stats != nil {
+			systemHealth.TotalRequests = stats.TotalRequests
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":          systemHealth.Status,
@@ -839,6 +849,7 @@ func (s *MultiProviderServer) handleStatus(c *gin.Context) {
 		"disabled_groups": systemHealth.DisabledGroups,
 		"total_keys":      systemHealth.TotalKeys,
 		"active_keys":     systemHealth.ActiveKeys,
+		"total_requests":  systemHealth.TotalRequests,
 	})
 }
 
