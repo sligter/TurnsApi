@@ -416,10 +416,12 @@ function enhancedLogsManagement() {
         fullscreenChartContent: '',
 
         async init() {
-            await this.loadLogs();
-            await this.loadStats();
-            await this.loadTokenStats();
-            await this.loadChartData();
+            await Promise.all([
+                this.loadLogs(),
+                this.loadStats(),
+                this.loadTokenStats(),
+                this.loadChartData()
+            ]);
             
             // 延迟初始化图表，确保数据已加载
             setTimeout(() => {
@@ -466,13 +468,8 @@ function enhancedLogsManagement() {
 
         async loadStats() {
             try {
-                const [proxyKeyStatsResponse, modelStatsResponse] = await Promise.all([
-                    fetch('/admin/logs/stats/api-keys'),
-                    fetch('/admin/logs/stats/models')
-                ]);
-
+                const proxyKeyStatsResponse = await fetch('/admin/logs/stats/api-keys');
                 const proxyKeyStats = await proxyKeyStatsResponse.json();
-                const modelStats = await modelStatsResponse.json();
 
                 if (proxyKeyStats.success) {
                     const stats = proxyKeyStats.stats || [];
@@ -706,10 +703,12 @@ function enhancedLogsManagement() {
         },
 
         async refreshLogs() {
-            await this.loadLogs();
-            await this.loadStats();
-            await this.loadTokenStats();
-            await this.loadChartData();
+            await Promise.all([
+                this.loadLogs(),
+                this.loadStats(),
+                this.loadTokenStats(),
+                this.loadChartData()
+            ]);
             // 延迟更新图表，确保数据已加载
             setTimeout(() => {
                 this.updateCharts();

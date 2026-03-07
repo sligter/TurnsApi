@@ -4,4 +4,5 @@
 /turnsapi.exe
 /turnsapi_amd64_x86
 /data/
+.gocache/
 *.db

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"turnsapi/internal"
@@ -33,6 +34,8 @@ type MultiProviderProxy struct {
 	requestLogger   *logger.RequestLogger
 	rpmLimiter      *ratelimit.RPMLimiter
 	database        *database.GroupsDB
+	groupRotationMu sync.Mutex
+	groupRotations  map[string]int
 }
 
 func hasHeaderKey(m map[string]string, key string) bool {
@@ -134,6 +137,7 @@ func NewMultiProviderProxy(
 		providerRouter:  providerRouter,
 		requestLogger:   requestLogger,
 		rpmLimiter:      rpmLimiter,
+		groupRotations:  make(map[string]int),
 	}
 }
 
@@ -173,6 +177,7 @@ func NewMultiProviderProxyWithProxyKey(
 		requestLogger:   requestLogger,
 		rpmLimiter:      rpmLimiter,
 		database:        groupsDB,
+		groupRotations:  make(map[string]int),
 	}
 }
 
@@ -456,6 +461,18 @@ func (p *MultiProviderProxy) handleRequestWithSmartFailover(
 	routeReq *router.RouteRequest,
 	startTime time.Time,
 ) bool {
+	{
+		resolvedCandidateGroups, err := p.providerRouter.GetCandidateGroups(routeReq)
+		if err != nil {
+			log.Printf("没有可用分组支持模型 %s: %v", req.Model, err)
+			return false
+		}
+
+		orderedGroups := p.orderCandidateGroups(req.Model, routeReq, resolvedCandidateGroups)
+		log.Printf("开始分组间轮换重试，模型 %s 候选分组 %v，轮换顺序 %v", req.Model, resolvedCandidateGroups, orderedGroups)
+
+		return p.tryGroupRotationWithLimit(c, req, routeReq, orderedGroups, startTime, 3)
+	}
 	// 获取支持该模型的所有分组
 	candidateGroups := p.providerRouter.GetGroupsForModel(req.Model, routeReq.AllowedGroups)
 	if len(candidateGroups) == 0 {
@@ -470,6 +487,118 @@ func (p *MultiProviderProxy) handleRequestWithSmartFailover(
 }
 
 // tryGroupRotationWithLimit 分组间轮换重试，最多重试指定数量的密钥
+func (p *MultiProviderProxy) buildGroupRotationKey(model string, routeReq *router.RouteRequest, candidateGroups []string) string {
+	if routeReq == nil {
+		routeReq = &router.RouteRequest{}
+	}
+
+	var b strings.Builder
+	b.WriteString(model)
+	b.WriteString("|proxy:")
+	b.WriteString(routeReq.ProxyKeyID)
+	b.WriteString("|forced-group:")
+	b.WriteString(routeReq.ProviderGroup)
+	b.WriteString("|forced-provider:")
+	b.WriteString(routeReq.ForceProviderType)
+	b.WriteString("|allowed:")
+	b.WriteString(strings.Join(routeReq.AllowedGroups, ","))
+	b.WriteString("|candidates:")
+	b.WriteString(strings.Join(candidateGroups, ","))
+	return b.String()
+}
+
+func (p *MultiProviderProxy) rotateGroups(groups []string, start int) []string {
+	if len(groups) <= 1 {
+		return append([]string(nil), groups...)
+	}
+
+	start = start % len(groups)
+	if start < 0 {
+		start = 0
+	}
+
+	rotated := make([]string, 0, len(groups))
+	rotated = append(rotated, groups[start:]...)
+	rotated = append(rotated, groups[:start]...)
+	return rotated
+}
+
+func moveGroupToFront(groups []string, target string) []string {
+	if len(groups) <= 1 || target == "" {
+		return append([]string(nil), groups...)
+	}
+
+	index := -1
+	for i, groupID := range groups {
+		if groupID == target {
+			index = i
+			break
+		}
+	}
+	if index <= 0 {
+		return append([]string(nil), groups...)
+	}
+
+	reordered := make([]string, 0, len(groups))
+	reordered = append(reordered, groups[index])
+	reordered = append(reordered, groups[:index]...)
+	reordered = append(reordered, groups[index+1:]...)
+	return reordered
+}
+
+func (p *MultiProviderProxy) orderCandidateGroups(model string, routeReq *router.RouteRequest, candidateGroups []string) []string {
+	if len(candidateGroups) <= 1 {
+		return append([]string(nil), candidateGroups...)
+	}
+
+	if routeReq != nil && routeReq.ProxyKeyID != "" && p.proxyKeyManager != nil {
+		selectedGroup, err := p.proxyKeyManager.SelectGroupForKeyFromCandidates(routeReq.ProxyKeyID, candidateGroups)
+		if err == nil && selectedGroup != "" {
+			return moveGroupToFront(candidateGroups, selectedGroup)
+		}
+	}
+
+	p.groupRotationMu.Lock()
+	defer p.groupRotationMu.Unlock()
+
+	rotationKey := p.buildGroupRotationKey(model, routeReq, candidateGroups)
+	start := p.groupRotations[rotationKey]
+	orderedGroups := p.rotateGroups(candidateGroups, start)
+	p.groupRotations[rotationKey] = (start + 1) % len(candidateGroups)
+	return orderedGroups
+}
+
+func (p *MultiProviderProxy) getAvailableKeyCount(groupID string) int {
+	groupStatus, exists := p.keyManager.GetGroupStatus(groupID)
+	if !exists {
+		return 0
+	}
+
+	groupInfo, ok := groupStatus.(map[string]interface{})
+	if !ok {
+		return 0
+	}
+
+	keyStatuses, ok := groupInfo["key_statuses"].(map[string]*keymanager.KeyStatus)
+	if !ok {
+		return 0
+	}
+
+	now := time.Now()
+	count := 0
+	for _, status := range keyStatuses {
+		if !status.IsActive {
+			continue
+		}
+		if !status.RateLimitUntil.IsZero() && now.Before(status.RateLimitUntil) {
+			continue
+		}
+		count++
+	}
+
+	return count
+}
+
 func (p *MultiProviderProxy) tryGroupRotationWithLimit(
 	c *gin.Context,
 	req *providers.ChatCompletionRequest,
@@ -478,6 +607,123 @@ func (p *MultiProviderProxy) tryGroupRotationWithLimit(
 	startTime time.Time,
 	maxRetries int,
 ) bool {
+	{
+		availableKeyCountsByGroup := make(map[string]int, len(candidateGroups))
+		availableGroupsOrdered := make([]string, 0, len(candidateGroups))
+		totalAvailableKeyCount := 0
+
+		for _, groupID := range candidateGroups {
+			availableKeyCount := p.getAvailableKeyCount(groupID)
+			if availableKeyCount == 0 {
+				log.Printf("分组 %s 没有可用密钥，跳过", groupID)
+				continue
+			}
+
+			availableKeyCountsByGroup[groupID] = availableKeyCount
+			availableGroupsOrdered = append(availableGroupsOrdered, groupID)
+			totalAvailableKeyCount += availableKeyCount
+		}
+
+		if len(availableGroupsOrdered) == 0 {
+			log.Printf("没有可用的分组和密钥")
+			return false
+		}
+
+		log.Printf("开始分组间轮换重试，候选分组 %v，可用分组 %v，总可用密钥 %d，最多重试 %d 次",
+			candidateGroups, availableGroupsOrdered, totalAvailableKeyCount, maxRetries)
+
+		attemptsByGroup := make(map[string]int, len(availableGroupsOrdered))
+		totalAttempts := 0
+
+		for totalAttempts < maxRetries {
+			madeProgress := false
+
+			for _, groupID := range availableGroupsOrdered {
+				if totalAttempts >= maxRetries {
+					break
+				}
+				if attemptsByGroup[groupID] >= availableKeyCountsByGroup[groupID] {
+					continue
+				}
+				if !p.rpmLimiter.Allow(groupID) {
+					log.Printf("分组 %s 超出RPM限制，跳过", groupID)
+					continue
+				}
+
+				apiKey, err := p.keyManager.GetNextKeyForGroup(groupID)
+				if err != nil {
+					log.Printf("分组 %s 获取下一密钥失败: %v", groupID, err)
+					attemptsByGroup[groupID] = availableKeyCountsByGroup[groupID]
+					continue
+				}
+
+				attemptsByGroup[groupID]++
+				totalAttempts++
+				madeProgress = true
+
+				log.Printf("轮换重试第 %d/%d 次：尝试分组 %s 的第 %d 个密钥 %s",
+					totalAttempts, maxRetries, groupID, attemptsByGroup[groupID], p.maskKey(apiKey))
+
+				groupRouteReq := &router.RouteRequest{
+					Model:             req.Model,
+					ProviderGroup:     groupID,
+					AllowedGroups:     routeReq.AllowedGroups,
+					ProxyKeyID:        routeReq.ProxyKeyID,
+					ForceProviderType: routeReq.ForceProviderType,
+				}
+
+				routeResult, err := p.providerRouter.RouteWithRetry(groupRouteReq)
+				if err != nil {
+					log.Printf("分组 %s 路由失败: %v", groupID, err)
+					p.updateKeyStatusInDatabase(groupID, apiKey, false, err.Error())
+					continue
+				}
+
+				p.providerRouter.UpdateProviderConfig(routeResult.ProviderConfig, apiKey)
+				p.applyForwardHeaders(c, routeResult.ProviderConfig)
+
+				provider, err := p.providerManager.GetProvider(groupID, routeResult.ProviderConfig)
+				if err != nil {
+					log.Printf("获取提供商实例失败: group=%s key=%s err=%v", groupID, p.maskKey(apiKey), err)
+					p.updateKeyStatusInDatabase(groupID, apiKey, false, err.Error())
+					continue
+				}
+				routeResult.Provider = provider
+
+				attemptReq := *req
+				if req.Extra != nil {
+					attemptReq.Extra = make(map[string]interface{}, len(req.Extra))
+					for k, v := range req.Extra {
+						attemptReq.Extra[k] = v
+					}
+				}
+				attemptReq.ApplyRequestParams(routeResult.ProviderConfig.RequestParams)
+
+				var success bool
+				if attemptReq.Stream {
+					success = p.handleStreamingRequest(c, &attemptReq, routeResult, apiKey, startTime)
+				} else {
+					success = p.handleNonStreamingRequest(c, &attemptReq, routeResult, apiKey, startTime)
+				}
+
+				if success {
+					log.Printf("分组间轮换重试成功：分组 %s 密钥 %s", groupID, p.maskKey(apiKey))
+					p.updateKeyStatusInDatabase(groupID, apiKey, true, "")
+					return true
+				}
+
+				log.Printf("分组间轮换重试失败：分组 %s 密钥 %s", groupID, p.maskKey(apiKey))
+				p.updateKeyStatusInDatabase(groupID, apiKey, false, "请求失败")
+			}
+
+			if !madeProgress {
+				break
+			}
+		}
+
+		log.Printf("分组间轮换重试完成，共尝试 %d 次，全部失败", totalAttempts)
+		return false
+	}
 	// 为每个分组准备密钥列表
 	groupKeys := make(map[string][]string)
 	totalAvailableKeys := 0

@@ -910,6 +910,42 @@ func (gdb *GroupsDB) LoadAllGroups() (map[string]*UserGroup, error) {
 	return groups, nil
 }
 
+func (gdb *GroupsDB) loadAPIKeysForGroups(groupIDs []string) (map[string][]string, error) {
+	result := make(map[string][]string, len(groupIDs))
+	if len(groupIDs) == 0 {
+		return result, nil
+	}
+
+	placeholders := make([]string, len(groupIDs))
+	args := make([]interface{}, len(groupIDs))
+	for i, groupID := range groupIDs {
+		placeholders[i] = "?"
+		args[i] = groupID
+		result[groupID] = []string{}
+	}
+
+	querySQL := fmt.Sprintf(
+		"SELECT group_id, api_key FROM provider_api_keys WHERE group_id IN (%s) ORDER BY group_id, key_order",
+		strings.Join(placeholders, ","),
+	)
+
+	rows, err := gdb.query(querySQL, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load API keys for groups: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var groupID, apiKey string
+		if err := rows.Scan(&groupID, &apiKey); err != nil {
+			return nil, fmt.Errorf("failed to scan API key: %w", err)
+		}
+		result[groupID] = append(result[groupID], apiKey)
+	}
+
+	return result, nil
+}
+
 // GetGroupsWithMetadata 获取分组配置及元数据（包括创建时间）
 func (gdb *GroupsDB) GetGroupsWithMetadata() (map[string]map[string]interface{}, error) {
 	// 查询所有分组及元数据
@@ -926,6 +962,7 @@ func (gdb *GroupsDB) GetGroupsWithMetadata() (map[string]map[string]interface{},
 	defer rows.Close()
 
 	groups := make(map[string]map[string]interface{})
+	groupIDs := make([]string, 0)
 
 	for rows.Next() {
 		var groupID, name, providerType, baseURL, rotationStrategy, modelsJSON, headersJSON string
@@ -954,24 +991,6 @@ func (gdb *GroupsDB) GetGroupsWithMetadata() (map[string]map[string]interface{},
 			headers = make(map[string]string)
 		}
 
-		// 查询API密钥
-		keysSQL := "SELECT api_key FROM provider_api_keys WHERE group_id = ? ORDER BY key_order"
-		keyRows, err := gdb.query(keysSQL, groupID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load API keys for group %s: %w", groupID, err)
-		}
-
-		var apiKeys []string
-		for keyRows.Next() {
-			var apiKey string
-			if err = keyRows.Scan(&apiKey); err != nil {
-				keyRows.Close()
-				return nil, fmt.Errorf("failed to scan API key: %w", err)
-			}
-			apiKeys = append(apiKeys, apiKey)
-		}
-		keyRows.Close()
-
 		// 构建分组信息
 		groupInfo := map[string]interface{}{
 			"group_id":            groupID,
@@ -982,7 +1001,7 @@ func (gdb *GroupsDB) GetGroupsWithMetadata() (map[string]map[string]interface{},
 			"timeout":             time.Duration(timeoutSeconds) * time.Second,
 			"max_retries":         maxRetries,
 			"rotation_strategy":   rotationStrategy,
-			"api_keys":            apiKeys,
+			"api_keys":            []string{},
 			"models":              models,
 			"headers":             headers,
 			"use_native_response": useNativeResponse,
@@ -993,6 +1012,18 @@ func (gdb *GroupsDB) GetGroupsWithMetadata() (map[string]map[string]interface{},
 		}
 
 		groups[groupID] = groupInfo
+		groupIDs = append(groupIDs, groupID)
+	}
+
+	apiKeysByGroup, err := gdb.loadAPIKeysForGroups(groupIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	for groupID, apiKeys := range apiKeysByGroup {
+		if groupInfo, exists := groups[groupID]; exists {
+			groupInfo["api_keys"] = apiKeys
+		}
 	}
 
 	return groups, nil

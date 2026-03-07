@@ -2024,11 +2024,12 @@
                                                     x-model="selectedKeys"
                                                     class="rounded"
                                                 />
-                                                <div class="flex-1 relative">
+                                                <div class="flex-1">
+                                                    <div class="relative">
                                                     <input
                                                         type="text"
                                                         x-model="groupFormData.api_keys[index + keyPageOffset]"
-                                                        class="w-full px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                                        class="w-full px-2 py-1 pr-8 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
                                                         placeholder="输入API密钥"
                                                     />
                                                     <!-- 验证状态指示器 -->
@@ -2116,6 +2117,12 @@
                                                             </svg>
                                                         </div>
                                                     </div>
+                                                    </div>
+                                                    <div
+                                                        x-show="shouldShowKeyValidationDetail(index + keyPageOffset)"
+                                                        class="mt-1 text-xs text-gray-600 whitespace-pre-wrap break-all"
+                                                        x-text="getKeyValidationDetail(index + keyPageOffset)"
+                                                    ></div>
                                                 </div>
                                                 <!-- 强制设置密钥状态按钮 -->
                                                 <div class="flex items-center space-x-1">
@@ -4329,6 +4336,10 @@
 
                     // 密钥验证相关
                     validatingKeys: false,
+                    keyValidationStatus: {},
+                    keyValidationDetails: {},
+                    invalidKeyIndexes: [],
+                    forcingKeyStatus: {},
                     keyValidationStatus: {}, // 存储每个密钥的验证状态
                     invalidKeyIndexes: [], // 存储无效密钥的索引
                     forcingKeyStatus: {}, // 存储正在强制设置状态的密钥索引
@@ -5014,15 +5025,33 @@
                                 };
 
                                 // 显示结果
+                                const unknownDetails = (
+                                    result.results || []
+                                )
+                                    .filter(
+                                        (item) =>
+                                            item.status === "unknown" &&
+                                            (item.error || item.response),
+                                    )
+                                    .map((item) => {
+                                        const detail =
+                                            item.error || item.response || "";
+                                        return `${this.maskApiKey(item.api_key)}: ${detail}`;
+                                    })
+                                    .join("\n\n");
                                 const unknownLine =
                                     unknownCount > 0
                                         ? `❓ 未知（可能限速/临时错误）：${unknownCount}\n`
                                         : "";
+                                const unknownDetailsLine = unknownDetails
+                                    ? `\n未知明细：\n${unknownDetails}\n`
+                                    : "";
                                 const message =
                                     `分组 "${provider.group_name}" 密钥验证完成：\n\n` +
                                     `✅ 有效密钥：${validCount}\n` +
                                     `❌ 无效密钥：${invalidCount}\n` +
                                     unknownLine +
+                                    unknownDetailsLine +
                                     `📊 总计：${totalCount}\n\n` +
                                     `验证结果已保存到密钥管理列表中`;
 
@@ -5296,6 +5325,7 @@
                             this.filteredModels = [];
                             this.modelSearchQuery = "";
                             this.keyValidationStatus = {};
+                            this.keyValidationDetails = {};
                             this.invalidKeyIndexes = [];
                             this.requestParamsValidationMessage = "";
                             this.requestParamsValidationError = false;
@@ -5639,12 +5669,14 @@
                         };
                         this.modelsText = "";
                         this.selectedKeys = [];
+                        this.keyValidationDetails = {};
                         this.keyPage = 1;
                         this.availableModels = [];
                         this.filteredModels = [];
                         this.modelSearchQuery = "";
                         this.batchKeysText = "";
                         this.keyValidationStatus = {};
+                        this.keyValidationDetails = {};
                         this.invalidKeyIndexes = [];
                         this.forcingKeyStatus = {};
                         this.bulkDeletingInvalidKeys = false;
@@ -5795,6 +5827,7 @@
                     removeGroupApiKey(index) {
                         if (this.groupFormData.api_keys.length > 1) {
                             this.groupFormData.api_keys.splice(index, 1);
+                            this.keyValidationDetails = {};
                             // 调整页码如果当前页没有数据了
                             if (
                                 this.keyPageOffset >=
@@ -5972,6 +6005,7 @@
                         });
 
                         this.keyValidationStatus = newValidationStatus;
+                        this.keyValidationDetails = {};
                         this.invalidKeyIndexes = newInvalidIndexes;
 
                         // 调整页码
@@ -6015,6 +6049,7 @@
 
                         this.validatingKeys = true;
                         this.keyValidationStatus = {};
+                        this.keyValidationDetails = {};
                         this.invalidKeyIndexes = [];
 
                         try {
@@ -6024,6 +6059,7 @@
                                     if (key.trim().length > 0) {
                                         this.keyValidationStatus[index] =
                                             "validating";
+                                        this.setKeyValidationDetail(index, "");
                                     }
                                 },
                             );
@@ -6095,16 +6131,28 @@
                                                 (result.valid
                                                     ? "valid"
                                                     : "invalid");
+                                            const detail =
+                                                result.error ||
+                                                result.response ||
+                                                "";
 
                                             if (status === "valid") {
                                                 this.keyValidationStatus[
                                                     originalIndex
                                                 ] = "valid";
+                                                this.setKeyValidationDetail(
+                                                    originalIndex,
+                                                    "",
+                                                );
                                                 validCount++;
                                             } else if (status === "invalid") {
                                                 this.keyValidationStatus[
                                                     originalIndex
                                                 ] = "invalid";
+                                                this.setKeyValidationDetail(
+                                                    originalIndex,
+                                                    detail,
+                                                );
                                                 this.invalidKeyIndexes.push(
                                                     originalIndex,
                                                 );
@@ -6113,6 +6161,10 @@
                                                 this.keyValidationStatus[
                                                     originalIndex
                                                 ] = "unknown";
+                                                this.setKeyValidationDetail(
+                                                    originalIndex,
+                                                    detail,
+                                                );
                                                 unknownCount++;
                                             }
                                         },
@@ -6164,6 +6216,7 @@
                         // 清除选中状态和验证状态
                         this.selectedKeys = [];
                         this.keyValidationStatus = {};
+                        this.keyValidationDetails = {};
                         this.invalidKeyIndexes = [];
                         
                         // 重置页码
@@ -6246,6 +6299,7 @@
                             if (response.ok && result.success) {
                                 // 更新本地验证状态
                                 this.keyValidationStatus[keyIndex] = status;
+                                this.setKeyValidationDetail(keyIndex, "");
                                 this.keyValidationStatus = { ...this.keyValidationStatus };
 
                                 // 更新失效密钥索引列表
@@ -6357,6 +6411,7 @@
                                 });
 
                                 this.keyValidationStatus = newValidationStatus;
+                                this.keyValidationDetails = {};
                                 this.invalidKeyIndexes = newInvalidIndexes;
 
                                 // 重置页码和选中状态
@@ -6400,6 +6455,7 @@
                                 if (data.success && data.validation_status) {
                                     // 更新密钥验证状态
                                     this.keyValidationStatus = {};
+                                    this.keyValidationDetails = {};
                                     this.invalidKeyIndexes = [];
                                     this.groupFormData.api_keys.forEach(
                                         (key, index) => {
@@ -6413,18 +6469,38 @@
                                                     data.validation_status[
                                                         key.trim()
                                                     ];
+                                                const detail =
+                                                    this.normalizeValidationDetail(
+                                                        status.validation_error,
+                                                    );
                                                 if (status.is_valid === true) {
                                                     this.keyValidationStatus[
                                                         index
                                                     ] = "valid";
+                                                    this.setKeyValidationDetail(
+                                                        index,
+                                                        "",
+                                                    );
                                                 } else if (
                                                     status.is_valid === false
                                                 ) {
                                                     this.keyValidationStatus[
                                                         index
                                                     ] = "invalid";
+                                                    this.setKeyValidationDetail(
+                                                        index,
+                                                        detail,
+                                                    );
                                                     this.invalidKeyIndexes.push(
                                                         index,
+                                                    );
+                                                } else if (detail) {
+                                                    this.keyValidationStatus[
+                                                        index
+                                                    ] = "unknown";
+                                                    this.setKeyValidationDetail(
+                                                        index,
+                                                        detail,
                                                     );
                                                 }
                                             }
@@ -6456,6 +6532,51 @@
                     },
 
                     // 获取失效密钥数量
+                    normalizeValidationDetail(detail) {
+                        if (!detail) {
+                            return "";
+                        }
+                        if (typeof detail === "string") {
+                            return detail.trim();
+                        }
+                        try {
+                            return JSON.stringify(detail);
+                        } catch (error) {
+                            return String(detail);
+                        }
+                    },
+
+                    setKeyValidationDetail(index, detail) {
+                        const normalized = this.normalizeValidationDetail(detail);
+                        if (normalized) {
+                            this.keyValidationDetails[index] = normalized;
+                        } else {
+                            delete this.keyValidationDetails[index];
+                        }
+                        this.keyValidationDetails = { ...this.keyValidationDetails };
+                    },
+
+                    getKeyValidationDetail(index) {
+                        return this.keyValidationDetails[index] || "";
+                    },
+
+                    shouldShowKeyValidationDetail(index) {
+                        return (
+                            this.keyValidationStatus[index] === "unknown" &&
+                            this.getKeyValidationDetail(index) !== ""
+                        );
+                    },
+
+                    maskApiKey(key) {
+                        if (!key) {
+                            return "";
+                        }
+                        if (key.length <= 8) {
+                            return "****";
+                        }
+                        return `${key.slice(0, 4)}****${key.slice(-4)}`;
+                    },
+
                     getInvalidKeyCount() {
                         let count = 0;
                         this.groupFormData.api_keys.forEach((key, index) => {

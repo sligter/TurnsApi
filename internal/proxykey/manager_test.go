@@ -2,6 +2,14 @@ package proxykey
 
 import "testing"
 
+type stubConfigProvider struct {
+	enabledGroups map[string]interface{}
+}
+
+func (s stubConfigProvider) GetEnabledGroups() map[string]interface{} {
+	return s.enabledGroups
+}
+
 func TestRemoveGroupFromAllKeys_DisableIfNoExplicitGroupsRemain(t *testing.T) {
 	m := &Manager{
 		keys: map[string]*ProxyKey{
@@ -138,5 +146,58 @@ func TestRemoveGroupFromAllKeys_KeepWeightedConfigForRemainingGroups(t *testing.
 	}
 	if _, exists := m.groupSelectors["k1"]; !exists {
 		t.Fatalf("selector should still exist for multi-group key")
+	}
+}
+
+func TestManager_GetSortedEnabledGroupIDs(t *testing.T) {
+	m := &Manager{
+		configProvider: stubConfigProvider{
+			enabledGroups: map[string]interface{}{
+				"x666-me":    struct{}{},
+				"cerebras":   struct{}{},
+				"openrouter": struct{}{},
+			},
+		},
+	}
+
+	got := m.getSortedEnabledGroupIDs()
+	want := []string{"cerebras", "openrouter", "x666-me"}
+	if len(got) != len(want) {
+		t.Fatalf("sorted groups length = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i, groupID := range want {
+		if got[i] != groupID {
+			t.Fatalf("sorted groups[%d] = %s, want %s (all=%v)", i, got[i], groupID, got)
+		}
+	}
+}
+
+func TestManager_SelectGroupForKey_UnrestrictedFallsBackToSortedFirstGroup(t *testing.T) {
+	m := &Manager{
+		keys: map[string]*ProxyKey{
+			"k1": {
+				ID:            "k1",
+				Key:           "secret",
+				Name:          "key-1",
+				IsActive:      true,
+				AllowedGroups: nil,
+			},
+		},
+		groupSelectors: make(map[string]*GroupSelector),
+		configProvider: stubConfigProvider{
+			enabledGroups: map[string]interface{}{
+				"openrouter": struct{}{},
+				"cerebras":   struct{}{},
+				"x666-me":    struct{}{},
+			},
+		},
+	}
+
+	got, err := m.SelectGroupForKey("k1")
+	if err != nil {
+		t.Fatalf("SelectGroupForKey() error = %v", err)
+	}
+	if got != "cerebras" {
+		t.Fatalf("SelectGroupForKey() = %s, want cerebras", got)
 	}
 }

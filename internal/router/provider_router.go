@@ -232,6 +232,41 @@ func (pr *ProviderRouter) createProviderConfig(groupID string, group *internal.U
 }
 
 // GetGroupsForModel 获取支持特定模型的所有分组（按优先级排序，仅限于允许的分组范围内）
+// GetCandidateGroups 返回当前请求可用的候选分组列表。
+func (pr *ProviderRouter) GetCandidateGroups(req *RouteRequest) ([]string, error) {
+	if req == nil {
+		return nil, fmt.Errorf("route request is required")
+	}
+
+	if req.ProviderGroup != "" {
+		group, exists := pr.config.GetGroupByID(req.ProviderGroup)
+		if !exists {
+			return nil, fmt.Errorf("specified provider group '%s' not found", req.ProviderGroup)
+		}
+		if !group.Enabled {
+			return nil, fmt.Errorf("specified provider group '%s' is disabled", req.ProviderGroup)
+		}
+		if !pr.hasGroupAccess(req.AllowedGroups, req.ProviderGroup) {
+			return nil, fmt.Errorf("access denied to provider group '%s'", req.ProviderGroup)
+		}
+		return []string{req.ProviderGroup}, nil
+	}
+
+	if req.ForceProviderType != "" {
+		groups := pr.GetGroupsByProviderType(req.ForceProviderType, req.AllowedGroups)
+		if len(groups) == 0 {
+			return nil, fmt.Errorf("no suitable provider group found for forced provider type '%s' with current permissions", req.ForceProviderType)
+		}
+		return groups, nil
+	}
+
+	groups := pr.GetGroupsForModel(req.Model, req.AllowedGroups)
+	if len(groups) == 0 {
+		return nil, fmt.Errorf("no suitable provider group found for model '%s' with current permissions", req.Model)
+	}
+	return groups, nil
+}
+
 func (pr *ProviderRouter) GetGroupsForModel(modelName string, allowedGroups []string) []string {
 	pr.mutex.RLock()
 	defer pr.mutex.RUnlock()
@@ -302,6 +337,26 @@ func (pr *ProviderRouter) GetGroupsForModel(modelName string, allowedGroups []st
 }
 
 // getAccessibleGroups 获取有权限访问的分组列表（按分组ID排序保证一致性）
+// GetGroupsByProviderType 返回当前权限下指定 provider type 的所有启用分组。
+func (pr *ProviderRouter) GetGroupsByProviderType(providerType string, allowedGroups []string) []string {
+	pr.mutex.RLock()
+	defer pr.mutex.RUnlock()
+
+	accessibleGroups := pr.getAccessibleGroups(allowedGroups)
+	candidateGroups := make([]string, 0, len(accessibleGroups))
+	for _, groupID := range accessibleGroups {
+		group := pr.config.UserGroups[groupID]
+		if group == nil || !group.Enabled {
+			continue
+		}
+		if group.ProviderType == providerType {
+			candidateGroups = append(candidateGroups, groupID)
+		}
+	}
+
+	return candidateGroups
+}
+
 func (pr *ProviderRouter) getAccessibleGroups(allowedGroups []string) []string {
 	var accessibleGroups []string
 

@@ -103,12 +103,83 @@ func (gs *GroupSelector) SelectGroup() (string, error) {
 	}
 }
 
+// SelectGroupFromCandidates 从候选分组子集里选择下一个分组。
+func (gs *GroupSelector) SelectGroupFromCandidates(candidates []string) (string, error) {
+	gs.mutex.Lock()
+	defer gs.mutex.Unlock()
+
+	if len(gs.allowedGroups) == 0 {
+		return "", fmt.Errorf("no allowed groups available")
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no candidate groups available")
+	}
+
+	candidateSet := make(map[string]struct{}, len(candidates))
+	for _, groupID := range candidates {
+		candidateSet[groupID] = struct{}{}
+	}
+
+	filteredCandidates := make([]string, 0, len(candidates))
+	for _, groupID := range gs.allowedGroups {
+		if _, ok := candidateSet[groupID]; ok {
+			filteredCandidates = append(filteredCandidates, groupID)
+		}
+	}
+
+	if len(filteredCandidates) == 0 {
+		return "", fmt.Errorf("no candidate groups match allowed groups")
+	}
+	if len(filteredCandidates) == 1 {
+		selectedGroup := filteredCandidates[0]
+		gs.updateUsageStats(selectedGroup)
+		return selectedGroup, nil
+	}
+
+	switch gs.config.Strategy {
+	case GroupSelectionRoundRobin:
+		return gs.selectRoundRobinFromCandidates(candidateSet), nil
+	case GroupSelectionWeighted:
+		return gs.selectWeightedFromCandidates(filteredCandidates), nil
+	case GroupSelectionRandom:
+		return gs.selectRandomFromCandidates(filteredCandidates), nil
+	case GroupSelectionFailover:
+		return gs.selectFailoverFromCandidates(candidateSet), nil
+	default:
+		return gs.selectRoundRobinFromCandidates(candidateSet), nil
+	}
+}
+
 // selectRoundRobin 轮询选择
 func (gs *GroupSelector) selectRoundRobin() string {
 	selectedGroup := gs.allowedGroups[gs.currentIndex]
 	gs.currentIndex = (gs.currentIndex + 1) % len(gs.allowedGroups)
 	gs.updateUsageStats(selectedGroup)
 	return selectedGroup
+}
+
+func (gs *GroupSelector) selectRoundRobinFromCandidates(candidateSet map[string]struct{}) string {
+	if len(gs.allowedGroups) == 0 {
+		return ""
+	}
+
+	startIndex := gs.currentIndex
+	if startIndex < 0 || startIndex >= len(gs.allowedGroups) {
+		startIndex = 0
+	}
+
+	for offset := 0; offset < len(gs.allowedGroups); offset++ {
+		idx := (startIndex + offset) % len(gs.allowedGroups)
+		groupID := gs.allowedGroups[idx]
+		if _, ok := candidateSet[groupID]; !ok {
+			continue
+		}
+		gs.currentIndex = (idx + 1) % len(gs.allowedGroups)
+		gs.updateUsageStats(groupID)
+		return groupID
+	}
+
+	return ""
 }
 
 // selectWeighted 权重选择
@@ -119,7 +190,7 @@ func (gs *GroupSelector) selectWeighted() string {
 
 	// 生成随机数
 	randNum := rand.Intn(gs.weightedSelector.total)
-	
+
 	// 根据权重选择分组
 	currentSum := 0
 	for i, weight := range gs.weightedSelector.weights {
@@ -137,10 +208,61 @@ func (gs *GroupSelector) selectWeighted() string {
 	return selectedGroup
 }
 
+func (gs *GroupSelector) selectWeightedFromCandidates(candidates []string) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	if gs.weightedSelector == nil {
+		return gs.selectRoundRobinFromCandidates(sliceToSet(candidates))
+	}
+
+	weightMap := make(map[string]int, len(gs.weightedSelector.groups))
+	for i, groupID := range gs.weightedSelector.groups {
+		weightMap[groupID] = gs.weightedSelector.weights[i]
+	}
+
+	total := 0
+	weights := make([]int, 0, len(candidates))
+	for _, groupID := range candidates {
+		weight := weightMap[groupID]
+		if weight <= 0 {
+			weight = 1
+		}
+		total += weight
+		weights = append(weights, weight)
+	}
+
+	if total <= 0 {
+		return gs.selectRoundRobinFromCandidates(sliceToSet(candidates))
+	}
+
+	randNum := rand.Intn(total)
+	currentSum := 0
+	for i, weight := range weights {
+		currentSum += weight
+		if randNum < currentSum {
+			selectedGroup := candidates[i]
+			gs.updateUsageStats(selectedGroup)
+			return selectedGroup
+		}
+	}
+
+	selectedGroup := candidates[0]
+	gs.updateUsageStats(selectedGroup)
+	return selectedGroup
+}
+
 // selectRandom 随机选择
 func (gs *GroupSelector) selectRandom() string {
 	index := rand.Intn(len(gs.allowedGroups))
 	selectedGroup := gs.allowedGroups[index]
+	gs.updateUsageStats(selectedGroup)
+	return selectedGroup
+}
+
+func (gs *GroupSelector) selectRandomFromCandidates(candidates []string) string {
+	index := rand.Intn(len(candidates))
+	selectedGroup := candidates[index]
 	gs.updateUsageStats(selectedGroup)
 	return selectedGroup
 }
@@ -156,6 +278,17 @@ func (gs *GroupSelector) selectFailover() string {
 }
 
 // updateUsageStats 更新使用统计
+func (gs *GroupSelector) selectFailoverFromCandidates(candidateSet map[string]struct{}) string {
+	for _, groupID := range gs.allowedGroups {
+		if _, ok := candidateSet[groupID]; !ok {
+			continue
+		}
+		gs.updateUsageStats(groupID)
+		return groupID
+	}
+	return ""
+}
+
 func (gs *GroupSelector) updateUsageStats(groupID string) {
 	gs.groupUsageCount[groupID]++
 	gs.lastUsedTime[groupID] = time.Now()
@@ -208,7 +341,7 @@ func (gs *GroupSelector) UpdateAllowedGroups(allowedGroups []string) {
 	// 清理不再允许的分组的统计信息
 	newGroupUsageCount := make(map[string]int64)
 	newLastUsedTime := make(map[string]time.Time)
-	
+
 	for _, groupID := range allowedGroups {
 		if count, exists := gs.groupUsageCount[groupID]; exists {
 			newGroupUsageCount[groupID] = count
@@ -225,4 +358,12 @@ func (gs *GroupSelector) UpdateAllowedGroups(allowedGroups []string) {
 	if gs.config.Strategy == GroupSelectionWeighted && len(gs.config.GroupWeights) > 0 {
 		gs.initWeightedSelector()
 	}
+}
+
+func sliceToSet(groups []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(groups))
+	for _, groupID := range groups {
+		set[groupID] = struct{}{}
+	}
+	return set
 }

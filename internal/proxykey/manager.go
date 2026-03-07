@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -156,14 +157,9 @@ func (m *Manager) loadKeysFromDB() error {
 
 		if len(key.AllowedGroups) == 0 {
 			// 空分组列表，使用所有启用的分组
-			if m.configProvider != nil {
-				enabledGroups := m.configProvider.GetEnabledGroups()
-				if len(enabledGroups) > 1 {
-					needsSelector = true
-					for groupID := range enabledGroups {
-						selectorGroups = append(selectorGroups, groupID)
-					}
-				}
+			selectorGroups = m.getSortedEnabledGroupIDs()
+			if len(selectorGroups) > 1 {
+				needsSelector = true
 			}
 		} else if len(key.AllowedGroups) > 1 {
 			// 多个指定分组
@@ -205,7 +201,7 @@ func (m *Manager) GenerateKeyWithConfig(name, description string, allowedGroups 
 	if len(allowedGroups) == 0 {
 		// 空分组列表表示可以访问所有分组
 		if m.configProvider != nil {
-			enabledGroups := m.configProvider.GetEnabledGroups()
+			enabledGroups := m.getSortedEnabledGroupIDs()
 			if len(enabledGroups) > 1 {
 				needsGroupSelection = true
 			}
@@ -267,12 +263,7 @@ func (m *Manager) GenerateKeyWithConfig(name, description string, allowedGroups 
 		var selectorGroups []string
 		if len(allowedGroups) == 0 {
 			// 空分组列表，使用所有启用的分组
-			if m.configProvider != nil {
-				enabledGroups := m.configProvider.GetEnabledGroups()
-				for groupID := range enabledGroups {
-					selectorGroups = append(selectorGroups, groupID)
-				}
-			}
+			selectorGroups = m.getSortedEnabledGroupIDs()
 		} else {
 			// 使用指定的分组
 			selectorGroups = allowedGroups
@@ -476,14 +467,9 @@ func (m *Manager) UpdateKeyWithConfig(id string, name, description string, isAct
 
 	if len(allowedGroups) == 0 {
 		// 空分组列表，使用所有启用的分组
-		if m.configProvider != nil {
-			enabledGroups := m.configProvider.GetEnabledGroups()
-			if len(enabledGroups) > 1 {
-				needsSelector = true
-				for groupID := range enabledGroups {
-					selectorGroups = append(selectorGroups, groupID)
-				}
-			}
+		selectorGroups = m.getSortedEnabledGroupIDs()
+		if len(selectorGroups) > 1 {
+			needsSelector = true
 		}
 	} else if len(allowedGroups) > 1 {
 		// 多个指定分组
@@ -686,8 +672,9 @@ func (m *Manager) SelectGroupForKey(keyID string) (string, error) {
 
 		// 如果没有分组选择器，从所有启用的分组中选择第一个
 		if m.configProvider != nil {
-			enabledGroups := m.configProvider.GetEnabledGroups()
-			for groupID := range enabledGroups {
+			enabledGroups := m.getSortedEnabledGroupIDs()
+			if len(enabledGroups) > 0 {
+				groupID := enabledGroups[0]
 				return groupID, nil // 返回第一个找到的分组
 			}
 		}
@@ -709,6 +696,60 @@ func (m *Manager) SelectGroupForKey(keyID string) (string, error) {
 }
 
 // GetGroupUsageStats 获取代理密钥的分组使用统计
+// SelectGroupForKeyFromCandidates 为代理密钥在候选分组子集中选择分组。
+func (m *Manager) SelectGroupForKeyFromCandidates(keyID string, candidates []string) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	key, exists := m.keys[keyID]
+	if !exists {
+		return "", fmt.Errorf("key not found")
+	}
+	if !key.IsActive {
+		return "", fmt.Errorf("key is not active")
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no candidate groups available")
+	}
+
+	if selector, exists := m.groupSelectors[keyID]; exists {
+		return selector.SelectGroupFromCandidates(candidates)
+	}
+
+	if len(key.AllowedGroups) == 1 {
+		for _, candidate := range candidates {
+			if candidate == key.AllowedGroups[0] {
+				return candidate, nil
+			}
+		}
+		return "", fmt.Errorf("single allowed group is not in candidate groups")
+	}
+
+	if len(key.AllowedGroups) > 1 {
+		allowedSet := make(map[string]struct{}, len(key.AllowedGroups))
+		for _, groupID := range key.AllowedGroups {
+			allowedSet[groupID] = struct{}{}
+		}
+		for _, candidate := range candidates {
+			if _, ok := allowedSet[candidate]; ok {
+				return candidate, nil
+			}
+		}
+		return "", fmt.Errorf("no candidate groups match allowed groups")
+	}
+
+	if m.configProvider != nil {
+		enabledGroups := m.configProvider.GetEnabledGroups()
+		for _, candidate := range candidates {
+			if _, ok := enabledGroups[candidate]; ok {
+				return candidate, nil
+			}
+		}
+	}
+
+	return candidates[0], nil
+}
+
 func (m *Manager) GetGroupUsageStats(keyID string) (map[string]GroupUsageStats, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -721,6 +762,22 @@ func (m *Manager) GetGroupUsageStats(keyID string) (map[string]GroupUsageStats, 
 }
 
 // generateID 生成唯一ID
+// getSortedEnabledGroupIDs returns enabled group IDs in a stable order.
+func (m *Manager) getSortedEnabledGroupIDs() []string {
+	if m.configProvider == nil {
+		return nil
+	}
+
+	enabledGroups := m.configProvider.GetEnabledGroups()
+	groupIDs := make([]string, 0, len(enabledGroups))
+	for groupID := range enabledGroups {
+		groupIDs = append(groupIDs, groupID)
+	}
+	sort.Strings(groupIDs)
+	return groupIDs
+}
+
+// generateID generates a unique ID.
 func generateID() string {
 	bytes := make([]byte, 8)
 	rand.Read(bytes)
