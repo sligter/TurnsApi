@@ -406,6 +406,37 @@ func (d *Database) getGlobalStats() (*TotalTokensStats, error) {
 	return stats, nil
 }
 
+func (d *Database) getLogOverviewStats() (*LogOverviewStats, error) {
+	stats := &LogOverviewStats{}
+	err := d.queryRow(`
+		SELECT
+			total_requests,
+			success_requests,
+			error_requests,
+			total_tokens,
+			CASE
+				WHEN total_requests > 0 THEN (total_duration * 1.0) / total_requests
+				ELSE 0
+			END AS avg_duration
+		FROM request_log_global_stats
+		WHERE stats_key = ?
+	`, globalRequestStatsKey).Scan(
+		&stats.TotalRequests,
+		&stats.SuccessRequests,
+		&stats.ErrorRequests,
+		&stats.TotalTokens,
+		&stats.AvgDuration,
+	)
+	if err == sql.ErrNoRows {
+		return stats, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query log overview stats: %w", err)
+	}
+
+	return stats, nil
+}
+
 func (d *Database) getRequestCountFromDaily(filter *LogFilter) (int64, error) {
 	selectExpr := "COALESCE(SUM(total_requests), 0)"
 	if filter != nil {

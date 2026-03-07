@@ -762,6 +762,7 @@
                     groupToken: { labels: [], total: [] }
                 },
                 chartUpdateQueued: false,
+                chartsReady: false,
 
                 async init() {
                     await Promise.all([
@@ -2656,6 +2657,185 @@
                             }
                         }
                     }));
+                },
+
+                initCharts() {
+                    if (typeof Chart === 'undefined') {
+                        console.warn('Chart.js not loaded');
+                        return;
+                    }
+
+                    this.chartsReady = true;
+                    try {
+                        this.updateCharts();
+                    } catch (error) {
+                        console.error('Error initializing charts:', error);
+                    }
+                },
+
+                scheduleChartPaint() {
+                    requestAnimationFrame(() => {
+                        if (!this.chartsReady) {
+                            this.initCharts();
+                            return;
+                        }
+                        this.queueChartUpdate();
+                    });
+                },
+
+                async init() {
+                    const filterOptionsPromise = this.loadFilterOptions().catch(error => {
+                        console.warn('Failed to load filter options during init:', error);
+                    });
+                    const logsPromise = this.loadLogs();
+                    const overviewPromise = this.loadOverviewStats();
+                    const chartsPromise = this.loadChartData();
+
+                    chartsPromise.finally(() => {
+                        this.scheduleChartPaint();
+                    });
+
+                    await Promise.allSettled([overviewPromise, chartsPromise]);
+                    await Promise.allSettled([logsPromise, filterOptionsPromise]);
+                },
+
+                async loadOverviewStats() {
+                    try {
+                        this.previousStats = {
+                            totalTokensUsed: this.totalTokensUsed,
+                            avgTokensPerRequest: this.avgTokensPerRequest,
+                            tokenSuccessRate: this.tokenSuccessRate
+                        };
+
+                        const response = await fetch('/admin/logs/stats/overview');
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}`);
+                        }
+
+                        const data = await response.json();
+                        if (!data.success || !data.stats) {
+                            return;
+                        }
+
+                        const totalRequests = Number(data.stats.total_requests || 0);
+                        const successRequests = Number(data.stats.success_requests || 0);
+                        const errorRequests = Number(data.stats.error_requests || 0);
+                        const totalTokens = Number(data.stats.total_tokens || 0);
+
+                        this.totalRequests = totalRequests;
+                        this.successRequests = successRequests;
+                        this.errorRequests = errorRequests;
+                        this.avgResponseTime = Math.round(Number(data.stats.avg_duration || 0));
+                        this.totalTokensUsed = totalTokens;
+                        this.avgTokensPerRequest = totalRequests > 0 ? Math.round(totalTokens / totalRequests) : 0;
+                        this.tokenSuccessRate = totalRequests > 0 ? Math.round((successRequests / totalRequests) * 100) : 0;
+                    } catch (error) {
+                        console.error('Error loading logs overview stats:', error);
+                    }
+                },
+
+                async loadStats() {
+                    return this.loadOverviewStats();
+                },
+
+                async loadTokenStats() {
+                    return this.loadOverviewStats();
+                },
+
+                refreshTokenStats() {
+                    return this.loadOverviewStats();
+                },
+
+                async loadChartData() {
+                    Object.keys(this.chartsLoading).forEach(key => {
+                        this.chartsLoading[key] = true;
+                    });
+
+                    try {
+                        const query = this.buildChartQueryParams();
+                        const response = await fetch(query ? `/admin/logs/stats/charts?${query}` : '/admin/logs/stats/charts');
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}`);
+                        }
+
+                        const payload = await response.json();
+                        if (!payload.success || !payload.data) {
+                            return;
+                        }
+
+                        const statusStats = payload.data.status || {};
+                        const modelStats = Array.isArray(payload.data.models) ? payload.data.models : [];
+                        const tokenTimeline = Array.isArray(payload.data.token_timeline) ? payload.data.token_timeline : [];
+                        const groupTokens = Array.isArray(payload.data.group_tokens) ? payload.data.group_tokens : [];
+
+                        this.chartData.status = {
+                            success: Number(statusStats.success || 0),
+                            error: Number(statusStats.error || 0)
+                        };
+
+                        const topModels = [...modelStats]
+                            .sort((a, b) => Number(b.total_requests || 0) - Number(a.total_requests || 0))
+                            .slice(0, 10);
+                        this.chartData.model = {
+                            labels: topModels.map(stat => stat.model || 'unknown'),
+                            counts: topModels.map(stat => Number(stat.total_requests || 0))
+                        };
+
+                        const timeline = [...tokenTimeline]
+                            .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+                        this.chartData.tokenTrend = {
+                            labels: timeline.map(point => point.date || ''),
+                            total: timeline.map(point => Number(point.total || 0))
+                        };
+
+                        const topGroups = [...groupTokens]
+                            .sort((a, b) => Number(b.total || 0) - Number(a.total || 0))
+                            .slice(0, 10);
+                        this.chartData.groupToken = {
+                            labels: topGroups.map(group => group.group || '-'),
+                            total: topGroups.map(group => Number(group.total || 0))
+                        };
+                    } catch (error) {
+                        console.error('Error loading chart data:', error);
+                    } finally {
+                        Object.keys(this.chartsLoading).forEach(key => {
+                            this.chartsLoading[key] = false;
+                        });
+                    }
+                },
+
+                async applyFilters() {
+                    this.currentPage = 1;
+
+                    const logsPromise = this.loadLogs();
+                    const chartsPromise = this.loadChartData();
+
+                    chartsPromise.finally(() => {
+                        this.scheduleChartPaint();
+                    });
+
+                    await Promise.allSettled([chartsPromise, logsPromise]);
+                },
+
+                async refreshLogs() {
+                    const filterOptionsPromise = this.loadFilterOptions().catch(error => {
+                        console.warn('Failed to refresh filter options:', error);
+                    });
+                    const logsPromise = this.loadLogs();
+                    const overviewPromise = this.loadOverviewStats();
+                    const chartsPromise = this.loadChartData();
+
+                    chartsPromise.finally(() => {
+                        this.scheduleChartPaint();
+                    });
+
+                    await Promise.allSettled([overviewPromise, chartsPromise]);
+                    await Promise.allSettled([logsPromise, filterOptionsPromise]);
+                },
+
+                async updateChartsWithTimeRange() {
+                    await this.loadChartData();
+                    this.scheduleChartPaint();
                 }
             }
         }

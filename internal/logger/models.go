@@ -135,4 +135,12 @@ type GroupTokensStat struct {
 	Success int64  `json:"success"`
 }
 
+type LogOverviewStats struct {
+	TotalRequests   int64   `json:"total_requests"`
+	SuccessRequests int64   `json:"success_requests"`
+	ErrorRequests   int64   `json:"error_requests"`
+	TotalTokens     int64   `json:"total_tokens"`
+	AvgDuration     float64 `json:"avg_duration"`
+}
+
 // NOTE: duplicate TotalTokensStats definition removed

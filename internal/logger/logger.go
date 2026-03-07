@@ -271,6 +271,11 @@ func (r *RequestLogger) GetTotalTokensStats() (*TotalTokensStats, error) {
 	return r.db.GetTotalTokensStats()
 }
 
+// GetLogOverviewStats 获取日志概览统计
+func (r *RequestLogger) GetLogOverviewStats() (*LogOverviewStats, error) {
+	return r.db.getLogOverviewStats()
+}
+
 // InsertProxyKey 插入代理密钥
 func (r *RequestLogger) InsertProxyKey(key *ProxyKey) error {
 	return r.db.InsertProxyKey(key)

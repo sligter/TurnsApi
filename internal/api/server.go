@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"turnsapi/internal"
@@ -194,6 +195,8 @@ func (s *Server) setupRoutes() {
 		admin.GET("/logs/filters", s.handleLogFilterOptions)
 		admin.GET("/logs/stats/filters", s.handleLogFilterOptions)
 		admin.GET("/logs/:id", s.handleRequestLogDetail)
+		admin.GET("/logs/stats/overview", s.handleLogsOverviewStats)
+		admin.GET("/logs/stats/charts", s.handleLogsChartsStats)
 		admin.GET("/logs/stats/api-keys", s.handleAPIKeyStats)
 		admin.GET("/logs/stats/models", s.handleModelStats)
 		admin.GET("/logs/stats/tokens", s.handleTotalTokensStats)
@@ -898,6 +901,126 @@ func (s *Server) handleAPIKeyStats(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"stats":   stats,
+	})
+}
+
+func (s *Server) handleLogsOverviewStats(c *gin.Context) {
+	if s.requestLogger == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Request logging is not available",
+			"code":  "logging_unavailable",
+		})
+		return
+	}
+
+	stats, err := s.requestLogger.GetLogOverviewStats()
+	if err != nil {
+		log.Printf("Failed to get logs overview stats: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to get logs overview stats",
+			"code":  "get_stats_failed",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"stats":   stats,
+	})
+}
+
+func (s *Server) handleLogsChartsStats(c *gin.Context) {
+	if s.requestLogger == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "error": "Request logger not available"})
+		return
+	}
+
+	filter := s.parseLogFilterWithRange(c)
+
+	var (
+		statusStats   *logger.StatusStats
+		modelStats    []*logger.ModelStats
+		tokenTimeline []*logger.TimelinePoint
+		groupTokens   []*logger.GroupTokensStat
+		firstErr      error
+		errMu         sync.Mutex
+		wg            sync.WaitGroup
+	)
+
+	setErr := func(err error) {
+		if err == nil {
+			return
+		}
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		errMu.Unlock()
+	}
+
+	wg.Add(4)
+
+	go func() {
+		defer wg.Done()
+		stats, err := s.requestLogger.GetStatusStats(filter)
+		if err != nil {
+			setErr(fmt.Errorf("failed to get status stats: %w", err))
+			return
+		}
+		statusStats = stats
+	}()
+
+	go func() {
+		defer wg.Done()
+		stats, err := s.requestLogger.GetModelStatsWithFilter(filter)
+		if err != nil {
+			setErr(fmt.Errorf("failed to get model stats: %w", err))
+			return
+		}
+		if len(stats) > 10 {
+			stats = stats[:10]
+		}
+		modelStats = stats
+	}()
+
+	go func() {
+		defer wg.Done()
+		points, err := s.requestLogger.GetTokensTimeline(filter)
+		if err != nil {
+			setErr(fmt.Errorf("failed to get tokens timeline: %w", err))
+			return
+		}
+		tokenTimeline = points
+	}()
+
+	go func() {
+		defer wg.Done()
+		stats, err := s.requestLogger.GetGroupTokensStats(filter)
+		if err != nil {
+			setErr(fmt.Errorf("failed to get group tokens: %w", err))
+			return
+		}
+		if len(stats) > 10 {
+			stats = stats[:10]
+		}
+		groupTokens = stats
+	}()
+
+	wg.Wait()
+
+	if firstErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": firstErr.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"status":         statusStats,
+			"models":         modelStats,
+			"token_timeline": tokenTimeline,
+			"group_tokens":   groupTokens,
+		},
 	})
 }
 
