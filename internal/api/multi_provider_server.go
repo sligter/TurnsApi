@@ -215,6 +215,8 @@ func (s *MultiProviderServer) setupRoutes() {
 
 		// 日志管理
 		admin.GET("/logs", s.handleLogs)
+		admin.GET("/logs/filters", s.handleLogFilterOptions)
+		admin.GET("/logs/stats/filters", s.handleLogFilterOptions)
 		admin.GET("/logs/:id", s.handleLogDetail)
 		admin.DELETE("/logs/batch", s.handleDeleteLogs)
 		admin.DELETE("/logs/clear", s.handleClearAllLogs)
@@ -1909,6 +1911,32 @@ func (s *MultiProviderServer) handleLogs(c *gin.Context) {
 	})
 }
 
+// handleLogFilterOptions 处理日志筛选项查询
+func (s *MultiProviderServer) handleLogFilterOptions(c *gin.Context) {
+	if s.requestLogger == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"success": false,
+			"error":   "Request logger not available",
+		})
+		return
+	}
+
+	options, err := s.requestLogger.GetLogFilterOptions()
+	if err != nil {
+		log.Printf("Failed to get log filter options: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   "Failed to get log filter options",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"options": options,
+	})
+}
+
 // handleLogDetail 处理日志详情查询
 func (s *MultiProviderServer) handleLogDetail(c *gin.Context) {
 	if s.requestLogger == nil {
@@ -1920,6 +1948,11 @@ func (s *MultiProviderServer) handleLogDetail(c *gin.Context) {
 	}
 
 	idStr := c.Param("id")
+	if idStr == "filters" {
+		s.handleLogFilterOptions(c)
+		return
+	}
+
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
