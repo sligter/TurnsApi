@@ -5533,6 +5533,10 @@
                                 parseInt(this.groupFormData.max_retries) || 3;
                             this.groupFormData.rpm_limit =
                                 parseInt(this.groupFormData.rpm_limit) || 0;
+                            this.groupFormData.max_error_count =
+                                parseInt(this.groupFormData.max_error_count) || 10;
+                            this.groupFormData.rate_limit_cooldown =
+                                parseInt(this.groupFormData.rate_limit_cooldown) || 0;
 
                             const url = this.showCreateGroupModal
                                 ? "/admin/groups"

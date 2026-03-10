@@ -78,6 +78,35 @@ func parseOptionalJSONInt(value interface{}, defaultValue int, fieldName string)
 }
 
 // GetEnabledGroups 实现ConfigProvider接口
+func parseOptionalJSONFloat64(value interface{}, defaultValue float64, fieldName string) (float64, error) {
+	switch v := value.(type) {
+	case nil:
+		return defaultValue, nil
+	case float64:
+		return v, nil
+	case float32:
+		return float64(v), nil
+	case int:
+		return float64(v), nil
+	case int32:
+		return float64(v), nil
+	case int64:
+		return float64(v), nil
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return defaultValue, nil
+		}
+		parsed, err := strconv.ParseFloat(trimmed, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s must be a number", fieldName)
+		}
+		return parsed, nil
+	default:
+		return 0, fmt.Errorf("%s must be a number", fieldName)
+	}
+}
+
 func (cma *configManagerAdapter) GetEnabledGroups() map[string]interface{} {
 	enabledGroups := cma.configManager.GetEnabledGroups()
 	result := make(map[string]interface{})
@@ -2779,8 +2808,8 @@ func (s *MultiProviderServer) handleCreateGroup(c *gin.Context) {
 		BaseURL             string                 `json:"base_url" binding:"required"`
 		APIVersion          string                 `json:"api_version"`
 		Enabled             bool                   `json:"enabled"`
-		Timeout             float64                `json:"timeout"`
-		MaxRetries          int                    `json:"max_retries"`
+		Timeout             interface{}            `json:"timeout"`
+		MaxRetries          interface{}            `json:"max_retries"`
 		RotationStrategy    string                 `json:"rotation_strategy"`
 		APIKeys             []string               `json:"api_keys"`
 		Models              []string               `json:"models"`
@@ -2789,13 +2818,57 @@ func (s *MultiProviderServer) handleCreateGroup(c *gin.Context) {
 		ModelMappings       map[string]string      `json:"model_mappings"`
 		UseNativeResponse   bool                   `json:"use_native_response"`
 		UseResponsesAPI     bool                   `json:"use_responses_api"`
-		RPMLimit            int                    `json:"rpm_limit"`
+		RPMLimit            interface{}            `json:"rpm_limit"`
 		DisablePermanentBan bool                   `json:"disable_permanent_ban"`
-		MaxErrorCount       int                    `json:"max_error_count"`
-		RateLimitCooldown   int                    `json:"rate_limit_cooldown"`
+		MaxErrorCount       interface{}            `json:"max_error_count"`
+		RateLimitCooldown   interface{}            `json:"rate_limit_cooldown"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Invalid request format: " + err.Error(),
+		})
+		return
+	}
+	timeoutSeconds, err := parseOptionalJSONFloat64(req.Timeout, 30, "timeout")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Invalid request format: " + err.Error(),
+		})
+		return
+	}
+
+	maxRetries, err := parseOptionalJSONInt(req.MaxRetries, 3, "max_retries")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Invalid request format: " + err.Error(),
+		})
+		return
+	}
+
+	rpmLimit, err := parseOptionalJSONInt(req.RPMLimit, 0, "rpm_limit")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Invalid request format: " + err.Error(),
+		})
+		return
+	}
+
+	maxErrorCount, err := parseOptionalJSONInt(req.MaxErrorCount, 10, "max_error_count")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Invalid request format: " + err.Error(),
+		})
+		return
+	}
+
+	rateLimitCooldown, err := parseOptionalJSONInt(req.RateLimitCooldown, 0, "rate_limit_cooldown")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
 			"message": "Invalid request format: " + err.Error(),
@@ -2831,12 +2904,6 @@ func (s *MultiProviderServer) handleCreateGroup(c *gin.Context) {
 	}
 
 	// 设置默认值
-	if req.Timeout == 0 {
-		req.Timeout = 30
-	}
-	if req.MaxRetries == 0 {
-		req.MaxRetries = 3
-	}
 	if req.RotationStrategy == "" {
 		req.RotationStrategy = "round_robin"
 	}
@@ -2860,8 +2927,8 @@ func (s *MultiProviderServer) handleCreateGroup(c *gin.Context) {
 		BaseURL:             req.BaseURL,
 		APIVersion:          req.APIVersion,
 		Enabled:             req.Enabled,
-		Timeout:             time.Duration(req.Timeout) * time.Second,
-		MaxRetries:          req.MaxRetries,
+		Timeout:             time.Duration(timeoutSeconds * float64(time.Second)),
+		MaxRetries:          maxRetries,
 		RotationStrategy:    req.RotationStrategy,
 		APIKeys:             req.APIKeys, // 直接使用前端提供的密钥
 		Models:              req.Models,
@@ -2870,10 +2937,10 @@ func (s *MultiProviderServer) handleCreateGroup(c *gin.Context) {
 		ModelMappings:       req.ModelMappings,
 		UseNativeResponse:   req.UseNativeResponse,
 		UseResponsesAPI:     req.UseResponsesAPI,
-		RPMLimit:            req.RPMLimit,
+		RPMLimit:            rpmLimit,
 		DisablePermanentBan: req.DisablePermanentBan,
-		MaxErrorCount:       req.MaxErrorCount,
-		RateLimitCooldown:   req.RateLimitCooldown,
+		MaxErrorCount:       maxErrorCount,
+		RateLimitCooldown:   rateLimitCooldown,
 	}
 
 	// 保存到配置管理器（会同时更新数据库和内存）
@@ -2895,7 +2962,7 @@ func (s *MultiProviderServer) handleCreateGroup(c *gin.Context) {
 	}
 
 	// 更新RPM限制
-	s.proxy.UpdateRPMLimit(req.GroupID, req.RPMLimit)
+	s.proxy.UpdateRPMLimit(req.GroupID, rpmLimit)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":  true,
@@ -2924,8 +2991,8 @@ func (s *MultiProviderServer) handleUpdateGroup(c *gin.Context) {
 		BaseURL             string                 `json:"base_url"`
 		APIVersion          string                 `json:"api_version"`
 		Enabled             *bool                  `json:"enabled"`
-		Timeout             *float64               `json:"timeout"`
-		MaxRetries          *int                   `json:"max_retries"`
+		Timeout             interface{}            `json:"timeout"`
+		MaxRetries          interface{}            `json:"max_retries"`
 		RotationStrategy    string                 `json:"rotation_strategy"`
 		APIKeys             []string               `json:"api_keys"`
 		Models              []string               `json:"models"`
@@ -2934,10 +3001,10 @@ func (s *MultiProviderServer) handleUpdateGroup(c *gin.Context) {
 		ModelMappings       map[string]string      `json:"model_mappings"`
 		UseNativeResponse   *bool                  `json:"use_native_response"`
 		UseResponsesAPI     *bool                  `json:"use_responses_api"`
-		RPMLimit            *int                   `json:"rpm_limit"`
+		RPMLimit            interface{}            `json:"rpm_limit"`
 		DisablePermanentBan *bool                  `json:"disable_permanent_ban"`
-		MaxErrorCount       *int                   `json:"max_error_count"`
-		RateLimitCooldown   *int                   `json:"rate_limit_cooldown"`
+		MaxErrorCount       interface{}            `json:"max_error_count"`
+		RateLimitCooldown   interface{}            `json:"rate_limit_cooldown"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -2949,6 +3016,87 @@ func (s *MultiProviderServer) handleUpdateGroup(c *gin.Context) {
 	}
 
 	// 更新字段（只更新提供的字段）
+	var err error
+	var parsedTimeoutSeconds float64
+	if req.Timeout != nil {
+		parsedTimeoutSeconds, err = parseOptionalJSONFloat64(
+			req.Timeout,
+			existingGroup.Timeout.Seconds(),
+			"timeout",
+		)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": "Invalid request format: " + err.Error(),
+			})
+			return
+		}
+	}
+
+	var parsedMaxRetries int
+	if req.MaxRetries != nil {
+		parsedMaxRetries, err = parseOptionalJSONInt(
+			req.MaxRetries,
+			existingGroup.MaxRetries,
+			"max_retries",
+		)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": "Invalid request format: " + err.Error(),
+			})
+			return
+		}
+	}
+
+	var parsedRPMLimit int
+	if req.RPMLimit != nil {
+		parsedRPMLimit, err = parseOptionalJSONInt(
+			req.RPMLimit,
+			existingGroup.RPMLimit,
+			"rpm_limit",
+		)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": "Invalid request format: " + err.Error(),
+			})
+			return
+		}
+	}
+
+	var parsedMaxErrorCount int
+	if req.MaxErrorCount != nil {
+		parsedMaxErrorCount, err = parseOptionalJSONInt(
+			req.MaxErrorCount,
+			existingGroup.MaxErrorCount,
+			"max_error_count",
+		)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": "Invalid request format: " + err.Error(),
+			})
+			return
+		}
+	}
+
+	var parsedRateLimitCooldown int
+	if req.RateLimitCooldown != nil {
+		parsedRateLimitCooldown, err = parseOptionalJSONInt(
+			req.RateLimitCooldown,
+			existingGroup.RateLimitCooldown,
+			"rate_limit_cooldown",
+		)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": "Invalid request format: " + err.Error(),
+			})
+			return
+		}
+	}
+
 	if req.Name != "" {
 		existingGroup.Name = req.Name
 	}
@@ -2981,10 +3129,10 @@ func (s *MultiProviderServer) handleUpdateGroup(c *gin.Context) {
 		existingGroup.Enabled = *req.Enabled
 	}
 	if req.Timeout != nil {
-		existingGroup.Timeout = time.Duration(*req.Timeout) * time.Second
+		existingGroup.Timeout = time.Duration(parsedTimeoutSeconds * float64(time.Second))
 	}
 	if req.MaxRetries != nil {
-		existingGroup.MaxRetries = *req.MaxRetries
+		existingGroup.MaxRetries = parsedMaxRetries
 	}
 	if req.RotationStrategy != "" {
 		existingGroup.RotationStrategy = req.RotationStrategy
@@ -3011,16 +3159,16 @@ func (s *MultiProviderServer) handleUpdateGroup(c *gin.Context) {
 		existingGroup.UseResponsesAPI = *req.UseResponsesAPI
 	}
 	if req.RPMLimit != nil {
-		existingGroup.RPMLimit = *req.RPMLimit
+		existingGroup.RPMLimit = parsedRPMLimit
 	}
 	if req.DisablePermanentBan != nil {
 		existingGroup.DisablePermanentBan = *req.DisablePermanentBan
 	}
 	if req.MaxErrorCount != nil {
-		existingGroup.MaxErrorCount = *req.MaxErrorCount
+		existingGroup.MaxErrorCount = parsedMaxErrorCount
 	}
 	if req.RateLimitCooldown != nil {
-		existingGroup.RateLimitCooldown = *req.RateLimitCooldown
+		existingGroup.RateLimitCooldown = parsedRateLimitCooldown
 	}
 
 	// 保存到配置管理器
