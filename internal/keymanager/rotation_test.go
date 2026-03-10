@@ -58,3 +58,28 @@ func TestGroupKeyManagerRoundRobinSkipsInactive(t *testing.T) {
 		}
 	}
 }
+
+func TestGroupKeyManagerDisablePermanentBanKeepsKeyActive(t *testing.T) {
+	gkm := NewGroupKeyManagerWithConfig(GroupKeyManagerConfig{
+		GroupID:             "g1",
+		GroupName:           "group1",
+		Keys:                []string{"k1"},
+		RotationStrategy:    "round_robin",
+		DisablePermanentBan: true,
+		MaxErrorCount:       2,
+	})
+
+	gkm.ReportError("k1", "upstream error")
+	gkm.ReportError("k1", "upstream error")
+
+	status := gkm.GetKeyStatuses()["k1"]
+	if status == nil {
+		t.Fatalf("expected key status for k1")
+	}
+	if !status.IsActive {
+		t.Fatalf("key should remain active when DisablePermanentBan is enabled")
+	}
+	if status.ErrorCount != 2 {
+		t.Fatalf("ErrorCount = %d, want 2", status.ErrorCount)
+	}
+}

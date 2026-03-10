@@ -361,6 +361,104 @@ func (p *OpenAIProvider) buildResponsesInput(messages []ChatMessage) ([]interfac
 	return input, nil
 }
 
+func cloneInterfaceMap(src map[string]interface{}) map[string]interface{} {
+	if len(src) == 0 {
+		return nil
+	}
+
+	dst := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func cloneStringKeyedMap(raw interface{}) map[string]interface{} {
+	switch m := raw.(type) {
+	case map[string]interface{}:
+		return cloneInterfaceMap(m)
+	case map[string]string:
+		dst := make(map[string]interface{}, len(m))
+		for k, v := range m {
+			dst[k] = v
+		}
+		return dst
+	default:
+		return nil
+	}
+}
+
+func normalizeOpenAIReasoningEffort(value interface{}) string {
+	return strings.TrimSpace(contentToString(value))
+}
+
+func normalizeOpenAIExtraForResponses(extra map[string]interface{}) map[string]interface{} {
+	if len(extra) == 0 {
+		return nil
+	}
+
+	normalized := cloneInterfaceMap(extra)
+	reasoning := cloneStringKeyedMap(normalized["reasoning"])
+	reasoningEffort := ""
+	if reasoning != nil {
+		reasoningEffort = normalizeOpenAIReasoningEffort(reasoning["effort"])
+	}
+	if reasoningEffort == "" {
+		reasoningEffort = normalizeOpenAIReasoningEffort(normalized["reasoning_effort"])
+	}
+
+	delete(normalized, "reasoning_effort")
+
+	if reasoningEffort != "" {
+		if reasoning == nil {
+			reasoning = make(map[string]interface{})
+		}
+		reasoning["effort"] = reasoningEffort
+		normalized["reasoning"] = reasoning
+	}
+
+	return normalized
+}
+
+func normalizeOpenAIExtraForChatCompletions(extra map[string]interface{}) map[string]interface{} {
+	if len(extra) == 0 {
+		return nil
+	}
+
+	normalized := cloneInterfaceMap(extra)
+	reasoning := cloneStringKeyedMap(normalized["reasoning"])
+	reasoningEffort := normalizeOpenAIReasoningEffort(normalized["reasoning_effort"])
+	if reasoning != nil {
+		if reasoningEffort == "" {
+			reasoningEffort = normalizeOpenAIReasoningEffort(reasoning["effort"])
+		}
+		delete(reasoning, "effort")
+		if len(reasoning) == 0 {
+			delete(normalized, "reasoning")
+		} else {
+			normalized["reasoning"] = reasoning
+		}
+	}
+
+	if reasoningEffort != "" {
+		normalized["reasoning_effort"] = reasoningEffort
+	} else {
+		delete(normalized, "reasoning_effort")
+	}
+
+	return normalized
+}
+
+func (p *OpenAIProvider) prepareChatCompletionsRequest(req *ChatCompletionRequest) *ChatCompletionRequest {
+	if req == nil {
+		return nil
+	}
+
+	prepared := *req
+	prepared.Extra = normalizeOpenAIExtraForChatCompletions(req.Extra)
+	return &prepared
+}
+
 func (p *OpenAIProvider) buildResponsesRequestBody(req *ChatCompletionRequest, stream bool) (map[string]interface{}, error) {
 	// Prefer mapping OpenAI "system" messages to Responses API `instructions`
 	// to maximize compatibility with the upstream schema.
@@ -417,7 +515,7 @@ func (p *OpenAIProvider) buildResponsesRequestBody(req *ChatCompletionRequest, s
 		"stream_options": {},
 		"messages":       {},
 	}
-	for k, v := range req.Extra {
+	for k, v := range normalizeOpenAIExtraForResponses(req.Extra) {
 		if _, blocked := blockedExtras[k]; blocked {
 			continue
 		}
@@ -1074,8 +1172,9 @@ func (p *OpenAIProvider) chatCompletionStreamFallbackNonStream(ctx context.Conte
 
 func (p *OpenAIProvider) chatCompletionViaChatCompletionsAPI(ctx context.Context, req *ChatCompletionRequest) (*ChatCompletionResponse, error) {
 	endpoint := joinURL(p.Config.BaseURL, "/chat/completions")
+	preparedReq := p.prepareChatCompletionsRequest(req)
 
-	reqBody, err := json.Marshal(req)
+	reqBody, err := json.Marshal(preparedReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
@@ -1118,8 +1217,9 @@ func (p *OpenAIProvider) chatCompletionStreamViaChatCompletionsAPI(ctx context.C
 	req.Stream = true
 
 	endpoint := joinURL(p.Config.BaseURL, "/chat/completions")
+	preparedReq := p.prepareChatCompletionsRequest(req)
 
-	reqBody, err := json.Marshal(req)
+	reqBody, err := json.Marshal(preparedReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}

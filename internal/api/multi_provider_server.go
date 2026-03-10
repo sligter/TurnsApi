@@ -50,6 +50,33 @@ type configManagerAdapter struct {
 	configManager *internal.ConfigManager
 }
 
+func parseOptionalJSONInt(value interface{}, defaultValue int, fieldName string) (int, error) {
+	switch v := value.(type) {
+	case nil:
+		return defaultValue, nil
+	case int:
+		return v, nil
+	case int32:
+		return int(v), nil
+	case int64:
+		return int(v), nil
+	case float64:
+		return int(v), nil
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return defaultValue, nil
+		}
+		parsed, err := strconv.Atoi(trimmed)
+		if err != nil {
+			return 0, fmt.Errorf("%s must be an integer", fieldName)
+		}
+		return parsed, nil
+	default:
+		return 0, fmt.Errorf("%s must be an integer", fieldName)
+	}
+}
+
 // GetEnabledGroups 实现ConfigProvider接口
 func (cma *configManagerAdapter) GetEnabledGroups() map[string]interface{} {
 	enabledGroups := cma.configManager.GetEnabledGroups()
@@ -1174,8 +1201,8 @@ func (s *MultiProviderServer) handleAvailableModelsByType(c *gin.Context) {
 		ProviderType string            `json:"provider_type" binding:"required"`
 		BaseURL      string            `json:"base_url" binding:"required"`
 		APIKeys      []string          `json:"api_keys" binding:"required"`
-		MaxRetries   int               `json:"max_retries"`
-		Timeout      int               `json:"timeout_seconds"`
+		MaxRetries   interface{}       `json:"max_retries"`
+		Timeout      interface{}       `json:"timeout_seconds"`
 		Headers      map[string]string `json:"headers"`
 	}
 
@@ -1201,12 +1228,20 @@ func (s *MultiProviderServer) handleAvailableModelsByType(c *gin.Context) {
 		return
 	}
 
-	// 设置默认值
-	if req.MaxRetries == 0 {
-		req.MaxRetries = 3
+	maxRetries, err := parseOptionalJSONInt(req.MaxRetries, 3, "max_retries")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid request: " + err.Error(),
+		})
+		return
 	}
-	if req.Timeout == 0 {
-		req.Timeout = 30
+
+	timeoutSeconds, err := parseOptionalJSONInt(req.Timeout, 30, "timeout_seconds")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid request: " + err.Error(),
+		})
+		return
 	}
 
 	// 检查是否强制刷新（绕过缓存）
@@ -1230,8 +1265,8 @@ func (s *MultiProviderServer) handleAvailableModelsByType(c *gin.Context) {
 		BaseURL:      req.BaseURL,
 		APIKeys:      validKeys,
 		Enabled:      true,
-		Timeout:      time.Duration(req.Timeout) * time.Second,
-		MaxRetries:   req.MaxRetries,
+		Timeout:      time.Duration(timeoutSeconds) * time.Second,
+		MaxRetries:   maxRetries,
 		Headers:      req.Headers,
 	}
 
@@ -3309,8 +3344,8 @@ func (s *MultiProviderServer) handleValidateKeysWithoutGroup(c *gin.Context) {
 		ProviderType     string            `json:"provider_type"`
 		BaseURL          string            `json:"base_url"`
 		Enabled          bool              `json:"enabled"`
-		Timeout          int               `json:"timeout"`
-		MaxRetries       int               `json:"max_retries"`
+		Timeout          interface{}       `json:"timeout"`
+		MaxRetries       interface{}       `json:"max_retries"`
 		RotationStrategy string            `json:"rotation_strategy"`
 		APIKeys          []string          `json:"api_keys"`
 		Headers          map[string]string `json:"headers"`
@@ -3333,6 +3368,23 @@ func (s *MultiProviderServer) handleValidateKeysWithoutGroup(c *gin.Context) {
 		return
 	}
 
+	maxRetries, err := parseOptionalJSONInt(req.MaxRetries, 3, "max_retries")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Invalid request data: " + err.Error(),
+		})
+		return
+	}
+
+	if _, err := parseOptionalJSONInt(req.Timeout, 30, "timeout"); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Invalid request data: " + err.Error(),
+		})
+		return
+	}
+
 	// 创建临时的UserGroup配置
 	tempGroup := &internal.UserGroup{
 		Name:             req.Name,
@@ -3340,7 +3392,7 @@ func (s *MultiProviderServer) handleValidateKeysWithoutGroup(c *gin.Context) {
 		BaseURL:          req.BaseURL,
 		Enabled:          req.Enabled,
 		Timeout:          10 * time.Minute, // 设置为10分钟超时
-		MaxRetries:       req.MaxRetries,
+		MaxRetries:       maxRetries,
 		RotationStrategy: req.RotationStrategy,
 		APIKeys:          req.APIKeys,
 		Headers:          req.Headers,

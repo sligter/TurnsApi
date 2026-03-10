@@ -1697,6 +1697,36 @@
                                                 </p>
                                             </div>
                                         </label>
+
+                                        <div
+                                            x-show="groupFormData.provider_type === 'openai'"
+                                            class="bg-emerald-50 border border-emerald-200 rounded-lg p-4"
+                                        >
+                                            <label
+                                                class="block text-sm font-medium text-gray-700 mb-2"
+                                            >
+                                                推理程度
+                                            </label>
+                                            <input
+                                                type="text"
+                                                list="openai-reasoning-effort-options"
+                                                x-model.trim="openAIReasoningEffort"
+                                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
+                                                placeholder="如: auto / low / medium / high / xhigh"
+                                            />
+                                            <datalist id="openai-reasoning-effort-options">
+                                                <option value="none"></option>
+                                                <option value="auto"></option>
+                                                <option value="low"></option>
+                                                <option value="medium"></option>
+                                                <option value="high"></option>
+                                                <option value="xhigh"></option>
+                                                <option value="minimal"></option>
+                                            </datalist>
+                                            <p class="text-xs text-gray-500 mt-2">
+                                                保存后会自动写入 OpenAI 请求参数。支持常见值，也支持直接输入自定义值。
+                                            </p>
+                                        </div>
                                     </div>
                                 </div>
 
@@ -2401,12 +2431,13 @@
                                             <label
                                                 class="flex items-start space-x-3 text-sm hover:bg-white p-2 rounded cursor-pointer border border-transparent hover:border-blue-200 transition-all"
                                             >
-                                                <input
-                                                    type="checkbox"
-                                                    :value="model.id"
-                                                    x-model="groupFormData.models"
-                                                    class="mt-1 rounded text-blue-600 focus:ring-blue-500"
-                                                />
+                                            <input
+                                                type="checkbox"
+                                                :value="model.id"
+                                                x-model="groupFormData.models"
+                                                @change="$nextTick(() => syncModelsTextFromSelection())"
+                                                class="mt-1 rounded text-blue-600 focus:ring-blue-500"
+                                            />
                                                 <div class="flex-1 min-w-0">
                                                     <div class="flex items-center space-x-2">
                                                         <span class="font-mono font-semibold text-gray-900" x-text="model.id"></span>
@@ -2487,6 +2518,7 @@
                                     </div>
                                     <textarea
                                         x-model="modelsText"
+                                        @input.debounce.200ms="syncModelsFromText()"
                                         class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         rows="3"
                                         placeholder="每行一个模型名称，留空表示支持所有模型"
@@ -2976,7 +3008,7 @@
                                 <div>
                                     <textarea
                                         x-model="requestParamsText"
-                                        @input="validateRequestParams()"
+                                        @input="validateRequestParams(); syncOpenAIReasoningEffortFromRequestParamsText()"
                                         class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
                                         rows="6"
                                         placeholder='{"temperature": 0.7, "max_tokens": 1000, "top_p": 0.9, "stream": true, "stop": ["Human:", "AI:"]}'
@@ -4389,6 +4421,7 @@
                     showRequestParamsHelp: false,
                     requestParamsValidationMessage: "",
                     requestParamsValidationError: false,
+                    openAIReasoningEffort: "",
 
                     // 模型重命名相关
                     modelMappings: [],
@@ -5255,7 +5288,9 @@
                                     fullGroupData.rotation_strategy ||
                                     "round_robin",
                                 api_keys: apiKeys,
-                                models: fullGroupData.models || [],
+                                models: this.normalizeModels(
+                                    fullGroupData.models || [],
+                                ),
                                 use_native_response: Boolean(
                                     fullGroupData.use_native_response,
                                 ),
@@ -5274,9 +5309,7 @@
                                     parseInt(fullGroupData.rate_limit_cooldown) || 0,
                             };
 
-                            this.modelsText = (fullGroupData.models || []).join(
-                                "\n",
-                            );
+                            this.syncModelsTextFromSelection();
 
                             // 加载Headers
                             this.loadHeadersFromGroup(fullGroupData);
@@ -5295,6 +5328,9 @@
                             } else {
                                 this.requestParamsText = "";
                             }
+                            this.syncOpenAIReasoningEffortFromRequestParams(
+                                fullGroupData.request_params,
+                            );
 
                             // 加载模型映射
                             this.modelMappings = [];
@@ -5421,20 +5457,8 @@
                                 this.providerStatusFilter;
                             const currentTypeFilter = this.providerTypeFilter;
 
-                            // 处理模型列表 - 合并选择的模型和手动输入的模型
-                            const manualModels = this.modelsText
-                                .split("\n")
-                                .map((line) => line.trim())
-                                .filter((line) => line.length > 0);
-
-                            // 去重合并模型列表
-                            const allModels = [
-                                ...new Set([
-                                    ...this.groupFormData.models,
-                                    ...manualModels,
-                                ]),
-                            ];
-                            this.groupFormData.models = allModels;
+                            // 处理模型列表 - 以文本框内容为准，并同步到选择列表
+                            this.syncModelsFromText();
 
                             // 过滤空的API密钥并去重
                             const validKeys = this.groupFormData.api_keys
@@ -5473,6 +5497,7 @@
                             } else {
                                 this.groupFormData.request_params = {};
                             }
+                            this.applyOpenAIReasoningEffortToRequestParams();
 
                             // 处理模型映射
                             const modelMappings = {};
@@ -5693,6 +5718,7 @@
                         this.showRequestParamsHelp = false;
                         this.requestParamsValidationMessage = "";
                         this.requestParamsValidationError = false;
+                        this.openAIReasoningEffort = "";
 
                         // 重置模型映射相关字段
                         this.modelMappings = [];
@@ -6070,9 +6096,16 @@
                                 provider_type: this.groupFormData.provider_type,
                                 base_url: this.groupFormData.base_url,
                                 enabled: true,
-                                timeout: this.groupFormData.timeout || 30,
+                                timeout:
+                                    Number.parseInt(
+                                        this.groupFormData.timeout,
+                                        10,
+                                    ) || 30,
                                 max_retries:
-                                    this.groupFormData.max_retries || 3,
+                                    Number.parseInt(
+                                        this.groupFormData.max_retries,
+                                        10,
+                                    ) || 3,
                                 rotation_strategy:
                                     this.groupFormData.rotation_strategy ||
                                     "round_robin",
@@ -6594,64 +6627,6 @@
                     async loadAvailableModels(forceRefresh = false) {
                         this.modelLoadError = null;
 
-                        // 如果是编辑模式，可以直接从现有分组加载模型
-                        if (this.showEditGroupModal && this.editingGroupId) {
-                            this.loadingModels = true;
-                            try {
-                                const url = forceRefresh
-                                    ? `/admin/models/available/${this.editingGroupId}?refresh=true`
-                                    : `/admin/models/available/${this.editingGroupId}`;
-
-                                const response = await fetch(url);
-
-                                if (response.ok) {
-                                    const data = await response.json();
-                                    // 解析响应数据
-                                    const groupData =
-                                        data.data[this.editingGroupId];
-                                    if (
-                                        groupData &&
-                                        groupData.models &&
-                                        groupData.models.data
-                                    ) {
-                                        this.availableModels =
-                                            groupData.models.data;
-                                        this.modelCacheTimestamp = new Date();
-                                        this.filterModels();
-                                        this.showMessage(
-                                            `成功加载 ${this.availableModels.length} 个模型${forceRefresh ? '（已刷新缓存）' : ''}`,
-                                            "success",
-                                        );
-                                    } else {
-                                        this.availableModels = [];
-                                        this.filterModels();
-                                        this.modelLoadError = "未找到可用模型";
-                                        this.showMessage(
-                                            "未找到可用模型",
-                                            "error",
-                                        );
-                                    }
-                                } else {
-                                    const errorData = await response.json();
-                                    this.modelLoadError = errorData.error?.message || "加载失败";
-                                    this.showMessage(
-                                        "加载模型失败: " + this.modelLoadError,
-                                        "error",
-                                    );
-                                }
-                            } catch (error) {
-                                this.modelLoadError = error.message;
-                                this.showMessage(
-                                    "网络错误: " + error.message,
-                                    "error",
-                                );
-                            } finally {
-                                this.loadingModels = false;
-                            }
-                            return;
-                        }
-
-                        // 创建模式需要先验证配置
                         if (
                             !this.groupFormData.provider_type ||
                             !this.groupFormData.base_url
@@ -6676,24 +6651,25 @@
 
                         this.loadingModels = true;
                         try {
-                            // 创建临时分组配置来测试模型加载
-                            const tempGroupData = {
-                                name: this.groupFormData.name || "temp",
-                                provider_type: this.groupFormData.provider_type,
-                                base_url: this.groupFormData.base_url,
-                                enabled: true,
-                                timeout: this.groupFormData.timeout || 30,
-                                max_retries:
-                                    this.groupFormData.max_retries || 3,
-                                rotation_strategy:
-                                    this.groupFormData.rotation_strategy ||
-                                    "round_robin",
-                                api_keys: validKeys,
+                            const requestHeaders = {
+                                ...(this.groupFormData.headers || {}),
                             };
+                            if (
+                                this.groupFormData.provider_type ===
+                                    "azure_openai" &&
+                                this.groupFormData.api_version &&
+                                !requestHeaders["api-version"]
+                            ) {
+                                requestHeaders["api-version"] =
+                                    this.groupFormData.api_version;
+                            }
 
-                            // 使用新的按类型加载模型API
+                            const requestUrl = forceRefresh
+                                ? "/admin/models/available/by-type?refresh=true"
+                                : "/admin/models/available/by-type";
+
                             const response = await fetch(
-                                "/admin/models/available/by-type",
+                                requestUrl,
                                 {
                                     method: "POST",
                                     headers: {
@@ -6701,13 +6677,21 @@
                                     },
                                     body: JSON.stringify({
                                         provider_type:
-                                            tempGroupData.provider_type,
-                                        base_url: tempGroupData.base_url,
-                                        api_keys: tempGroupData.api_keys,
-                                        timeout_seconds: tempGroupData.timeout,
-                                        max_retries: tempGroupData.max_retries,
-                                        headers:
-                                            this.groupFormData.headers || {},
+                                            this.groupFormData.provider_type,
+                                        base_url:
+                                            this.groupFormData.base_url.trim(),
+                                        api_keys: validKeys,
+                                        timeout_seconds:
+                                            Number.parseInt(
+                                                this.groupFormData.timeout,
+                                                10,
+                                            ) || 30,
+                                        max_retries:
+                                            Number.parseInt(
+                                                this.groupFormData.max_retries,
+                                                10,
+                                            ) || 3,
+                                        headers: requestHeaders,
                                     }),
                                 },
                             );
@@ -6737,9 +6721,16 @@
                                 }
                             } else {
                                 const errorData = await response.json();
-                                this.modelLoadError = errorData.error || errorData.suggestion || "加载失败";
+                                this.modelLoadError =
+                                    errorData.error?.message ||
+                                    errorData.error ||
+                                    errorData.suggestion ||
+                                    "加载失败";
                                 this.showMessage(
-                                    "加载模型失败: " + (errorData.error || "未知错误"),
+                                    "加载模型失败: " +
+                                        (errorData.error?.message ||
+                                            errorData.error ||
+                                            "未知错误"),
                                     "error",
                                 );
                             }
@@ -6807,9 +6798,51 @@
                         return `${tokens} tokens`;
                     },
 
+                    normalizeModels(models) {
+                        if (!Array.isArray(models)) {
+                            return [];
+                        }
+
+                        const seen = new Set();
+                        const normalized = [];
+
+                        models.forEach((model) => {
+                            if (typeof model !== "string") {
+                                return;
+                            }
+
+                            const trimmedModel = model.trim();
+                            if (!trimmedModel || seen.has(trimmedModel)) {
+                                return;
+                            }
+
+                            seen.add(trimmedModel);
+                            normalized.push(trimmedModel);
+                        });
+
+                        return normalized;
+                    },
+
+                    syncModelsTextFromSelection() {
+                        this.groupFormData.models = this.normalizeModels(
+                            this.groupFormData.models,
+                        );
+                        this.modelsText = this.groupFormData.models.join("\n");
+                    },
+
+                    syncModelsFromText() {
+                        this.groupFormData.models = this.normalizeModels(
+                            this.modelsText.split("\n"),
+                        );
+                        this.modelsText = this.groupFormData.models.join("\n");
+                    },
+
                     // Sort selected models
                     sortSelectedModels() {
-                        this.groupFormData.models = [...this.groupFormData.models].sort();
+                        this.groupFormData.models = [
+                            ...this.groupFormData.models,
+                        ].sort();
+                        this.syncModelsTextFromSelection();
                     },
 
                     // 清除模型搜索
@@ -6823,11 +6856,13 @@
                         this.groupFormData.models = this.filteredModels.map(
                             (model) => model.id,
                         );
+                        this.syncModelsTextFromSelection();
                     },
 
                     // 清空模型选择
                     clearAllModels() {
                         this.groupFormData.models = [];
+                        this.syncModelsTextFromSelection();
                     },
 
                     // 移除单个模型
@@ -6836,6 +6871,92 @@
                             this.groupFormData.models.filter(
                                 (id) => id !== modelId,
                             );
+                        this.syncModelsTextFromSelection();
+                    },
+
+                    normalizeOpenAIReasoningEffort(value) {
+                        return String(value || "").trim();
+                    },
+
+                    extractOpenAIReasoningEffort(requestParams) {
+                        if (
+                            !requestParams ||
+                            typeof requestParams !== "object" ||
+                            Array.isArray(requestParams)
+                        ) {
+                            return "";
+                        }
+
+                        const directEffort =
+                            this.normalizeOpenAIReasoningEffort(
+                                requestParams.reasoning_effort,
+                            );
+                        if (directEffort) {
+                            return directEffort;
+                        }
+
+                        const reasoning = requestParams.reasoning;
+                        if (
+                            reasoning &&
+                            typeof reasoning === "object" &&
+                            !Array.isArray(reasoning)
+                        ) {
+                            return this.normalizeOpenAIReasoningEffort(
+                                reasoning.effort,
+                            );
+                        }
+
+                        return "";
+                    },
+
+                    syncOpenAIReasoningEffortFromRequestParams(requestParams) {
+                        this.openAIReasoningEffort =
+                            this.extractOpenAIReasoningEffort(requestParams);
+                    },
+
+                    syncOpenAIReasoningEffortFromRequestParamsText() {
+                        if (!this.requestParamsText.trim()) {
+                            this.openAIReasoningEffort = "";
+                            return;
+                        }
+
+                        try {
+                            const parsed = JSON.parse(
+                                this.requestParamsText.trim(),
+                            );
+                            this.syncOpenAIReasoningEffortFromRequestParams(
+                                parsed,
+                            );
+                        } catch (error) {
+                            // Keep the current control value while the JSON text is incomplete.
+                        }
+                    },
+
+                    applyOpenAIReasoningEffortToRequestParams() {
+                        if (this.groupFormData.provider_type !== "openai") {
+                            return;
+                        }
+
+                        const requestParams =
+                            this.groupFormData.request_params &&
+                            typeof this.groupFormData.request_params ===
+                                "object" &&
+                            !Array.isArray(this.groupFormData.request_params)
+                                ? { ...this.groupFormData.request_params }
+                                : {};
+
+                        const reasoningEffort =
+                            this.normalizeOpenAIReasoningEffort(
+                                this.openAIReasoningEffort,
+                            );
+
+                        if (reasoningEffort) {
+                            requestParams.reasoning_effort = reasoningEffort;
+                        } else {
+                            delete requestParams.reasoning_effort;
+                        }
+
+                        this.groupFormData.request_params = requestParams;
                     },
 
                     // 验证JSON请求参数格式
