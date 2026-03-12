@@ -1345,8 +1345,8 @@ func (d *Database) CleanupOldLogs(retentionDays int) error {
 
 	log.Printf("Cleaned up %d old log records", rowsAffected)
 	if rowsAffected > 0 {
-		if err := d.rebuildStatsTables(); err != nil {
-			return fmt.Errorf("failed to rebuild stats after cleanup: %w", err)
+		if err := d.rebuildDailyStatsOnly(); err != nil {
+			return fmt.Errorf("failed to rebuild daily stats after cleanup: %w", err)
 		}
 	}
 	return nil
@@ -1379,8 +1379,8 @@ func (d *Database) DeleteRequestLogs(ids []int64) (int64, error) {
 	}
 
 	if rowsAffected > 0 {
-		if err := d.rebuildStatsTables(); err != nil {
-			return 0, fmt.Errorf("failed to rebuild stats after deleting request logs: %w", err)
+		if err := d.rebuildDailyStatsOnly(); err != nil {
+			return 0, fmt.Errorf("failed to rebuild daily stats after deleting request logs: %w", err)
 		}
 	}
 
@@ -1402,8 +1402,8 @@ func (d *Database) ClearAllRequestLogs() (int64, error) {
 	}
 
 	if rowsAffected > 0 {
-		if err := d.rebuildStatsTables(); err != nil {
-			return 0, fmt.Errorf("failed to rebuild stats after clearing request logs: %w", err)
+		if err := d.rebuildDailyStatsOnly(); err != nil {
+			return 0, fmt.Errorf("failed to rebuild daily stats after clearing request logs: %w", err)
 		}
 	}
 
@@ -1425,8 +1425,8 @@ func (d *Database) ClearErrorRequestLogs() (int64, error) {
 	}
 
 	if rowsAffected > 0 {
-		if err := d.rebuildStatsTables(); err != nil {
-			return 0, fmt.Errorf("failed to rebuild stats after clearing error logs: %w", err)
+		if err := d.rebuildDailyStatsOnly(); err != nil {
+			return 0, fmt.Errorf("failed to rebuild daily stats after clearing error logs: %w", err)
 		}
 	}
 

@@ -168,9 +168,41 @@ func (d *Database) rebuildStatsTables() error {
 		_ = tx.Rollback()
 	}()
 
-	if _, err := tx.Exec(d.rebind(`DELETE FROM request_log_daily_stats`)); err != nil {
-		return fmt.Errorf("failed to clear request_log_daily_stats: %w", err)
+	if err := d.rebuildGlobalStatsTx(tx); err != nil {
+		return err
 	}
+	if err := d.rebuildDailyStatsTx(tx); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit stats rebuild transaction: %w", err)
+	}
+
+	return nil
+}
+
+func (d *Database) rebuildDailyStatsOnly() error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin daily stats rebuild transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	if err := d.rebuildDailyStatsTx(tx); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit daily stats rebuild transaction: %w", err)
+	}
+
+	return nil
+}
+
+func (d *Database) rebuildGlobalStatsTx(tx *sql.Tx) error {
 	if _, err := tx.Exec(d.rebind(`DELETE FROM request_log_global_stats WHERE stats_key = ?`), globalRequestStatsKey); err != nil {
 		return fmt.Errorf("failed to clear request_log_global_stats: %w", err)
 	}
@@ -193,6 +225,14 @@ func (d *Database) rebuildStatsTables() error {
 		FROM request_logs
 	`), globalRequestStatsKey); err != nil {
 		return fmt.Errorf("failed to rebuild global request stats: %w", err)
+	}
+
+	return nil
+}
+
+func (d *Database) rebuildDailyStatsTx(tx *sql.Tx) error {
+	if _, err := tx.Exec(d.rebind(`DELETE FROM request_log_daily_stats`)); err != nil {
+		return fmt.Errorf("failed to clear request_log_daily_stats: %w", err)
 	}
 
 	bucketExpr := "strftime('%Y-%m-%d', created_at)"
@@ -225,10 +265,6 @@ func (d *Database) rebuildStatsTables() error {
 	`, bucketExpr)
 	if _, err := tx.Exec(d.rebind(insertDailyQuery)); err != nil {
 		return fmt.Errorf("failed to rebuild daily request stats: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit stats rebuild transaction: %w", err)
 	}
 
 	return nil

@@ -183,7 +183,7 @@ database:
   max_idle_conns: 10
   conn_max_lifetime: "1h"
 
-  retention_days: 30  # 日志保留天数
+  retention_days: 0  # 日志保留天数
 
 # 请求日志写入优化（高并发推荐开启异步批量写入）
 request_logs:

@@ -161,7 +161,7 @@
         <!-- Total Tokens Stats -->
         <div class="bg-white rounded-lg shadow-md p-6 mb-8 fade-in">
             <div class="flex justify-between items-center mb-4">
-                <h2 class="text-xl font-bold text-gray-800">Token使用统计</h2>
+                <h2 class="text-xl font-bold text-gray-800">累计Token统计</h2>
                 <div class="flex gap-2">
                     <button @click="refreshTokenStats()" class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded text-sm transition duration-200">
                         刷新Token统计
@@ -174,7 +174,7 @@
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div class="text-center p-4 bg-blue-50 rounded-lg">
                     <div class="text-2xl font-bold text-blue-600" x-text="totalTokensUsed.toLocaleString()"></div>
-                    <div class="text-sm text-gray-600">总Token数</div>
+                    <div class="text-sm text-gray-600">累计总Token数</div>
                     <div class="text-xs text-gray-500 mt-1" x-text="getTokenTrend('total')"></div>
                 </div>
                 <div class="hidden">
@@ -205,7 +205,7 @@
                         </svg>
                     </div>
                     <div class="ml-4">
-                        <p class="text-sm font-medium text-gray-600">总请求数</p>
+                        <p class="text-sm font-medium text-gray-600">累计总请求数</p>
                         <p class="text-xl md:text-2xl font-semibold text-gray-900" x-text="totalRequests"></p>
                     </div>
                 </div>
@@ -219,7 +219,7 @@
                         </svg>
                     </div>
                     <div class="ml-4">
-                        <p class="text-sm font-medium text-gray-600">成功请求</p>
+                        <p class="text-sm font-medium text-gray-600">累计成功请求</p>
                         <p class="text-xl md:text-2xl font-semibold text-gray-900" x-text="successRequests"></p>
                     </div>
                 </div>
@@ -233,7 +233,7 @@
                         </svg>
                     </div>
                     <div class="ml-4">
-                        <p class="text-sm font-medium text-gray-600">失败请求</p>
+                        <p class="text-sm font-medium text-gray-600">累计失败请求</p>
                         <p class="text-xl md:text-2xl font-semibold text-gray-900" x-text="errorRequests"></p>
                     </div>
                 </div>

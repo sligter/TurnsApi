@@ -640,7 +640,7 @@ func TestAggregatedStatsPersistAcrossRestart(t *testing.T) {
 	}
 }
 
-func TestAggregatedStatsRebuildAfterClearErrorLogs(t *testing.T) {
+func TestLifetimeStatsDoNotDecreaseAfterClearErrorLogs(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test.db")
 
@@ -703,8 +703,16 @@ func TestAggregatedStatsRebuildAfterClearErrorLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get total stats after clear: %v", err)
 	}
-	if totalStats.TotalRequests != 1 || totalStats.SuccessRequests != 1 || totalStats.TotalTokens != 30 {
-		t.Fatalf("Unexpected totals after clear: %+v", totalStats)
+	if totalStats.TotalRequests != 2 || totalStats.SuccessRequests != 1 || totalStats.TotalTokens != 30 {
+		t.Fatalf("Unexpected lifetime totals after clear: %+v", totalStats)
+	}
+
+	overviewStats, err := db.getLogOverviewStats()
+	if err != nil {
+		t.Fatalf("Failed to get overview stats after clear: %v", err)
+	}
+	if overviewStats.TotalRequests != 2 || overviewStats.SuccessRequests != 1 || overviewStats.ErrorRequests != 1 || overviewStats.TotalTokens != 30 {
+		t.Fatalf("Unexpected lifetime overview after clear: %+v", overviewStats)
 	}
 
 	statusStats, err := db.GetStatusStats(&LogFilter{})
@@ -712,6 +720,77 @@ func TestAggregatedStatsRebuildAfterClearErrorLogs(t *testing.T) {
 		t.Fatalf("Failed to get status stats after clear: %v", err)
 	}
 	if statusStats.Success != 1 || statusStats.Error != 0 {
-		t.Fatalf("Unexpected status stats after clear: %+v", statusStats)
+		t.Fatalf("Unexpected current-log status stats after clear: %+v", statusStats)
+	}
+}
+
+func TestLifetimeStatsDoNotDecreaseAfterCleanupOldLogs(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	db, err := NewDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	now := time.Now()
+	rows := []*RequestLog{
+		{
+			ProxyKeyName:  "key-old",
+			ProxyKeyID:    "key-old-id",
+			ProviderGroup: "group-a",
+			OpenRouterKey: "masked-old",
+			Model:         "model-a",
+			RequestBody:   "{}",
+			ResponseBody:  "{}",
+			StatusCode:    200,
+			IsStream:      false,
+			Duration:      100,
+			TokensUsed:    40,
+			ClientIP:      "127.0.0.1",
+			CreatedAt:     now.AddDate(0, 0, -40),
+		},
+		{
+			ProxyKeyName:  "key-new",
+			ProxyKeyID:    "key-new-id",
+			ProviderGroup: "group-b",
+			OpenRouterKey: "masked-new",
+			Model:         "model-b",
+			RequestBody:   "{}",
+			ResponseBody:  "{}",
+			StatusCode:    200,
+			IsStream:      false,
+			Duration:      120,
+			TokensUsed:    60,
+			ClientIP:      "127.0.0.1",
+			CreatedAt:     now,
+		},
+	}
+
+	for _, row := range rows {
+		if err := db.InsertRequestLog(row); err != nil {
+			t.Fatalf("Failed to insert request log: %v", err)
+		}
+	}
+
+	if err := db.CleanupOldLogs(30); err != nil {
+		t.Fatalf("Failed to cleanup old logs: %v", err)
+	}
+
+	totalStats, err := db.GetTotalTokensStats()
+	if err != nil {
+		t.Fatalf("Failed to get total stats after cleanup: %v", err)
+	}
+	if totalStats.TotalRequests != 2 || totalStats.SuccessRequests != 2 || totalStats.TotalTokens != 100 {
+		t.Fatalf("Unexpected lifetime totals after cleanup: %+v", totalStats)
+	}
+
+	currentCount, err := db.GetRequestCountWithFilter(&LogFilter{})
+	if err != nil {
+		t.Fatalf("Failed to get current request count after cleanup: %v", err)
+	}
+	if currentCount != 1 {
+		t.Fatalf("Expected 1 retained log after cleanup, got %d", currentCount)
 	}
 }
