@@ -384,7 +384,7 @@ func (m *Manager) GetAllKeys() []*ProxyKey {
 
 	log.Printf("GetAllKeys called: found %d keys in memory", len(m.keys))
 	for id, key := range m.keys {
-		log.Printf("  - Key ID: %s, Name: %s, Active: %t", id, key.Name, key.IsActive)
+		log.Printf("  - Key ID: %s, Name: %s, Active: %t, EnforceModelMappings: %t", id, key.Name, key.IsActive, key.EnforceModelMappings)
 	}
 
 	keys := make([]*ProxyKey, 0, len(m.keys))
@@ -392,6 +392,31 @@ func (m *Manager) GetAllKeys() []*ProxyKey {
 		keys = append(keys, key)
 	}
 	return keys
+}
+
+// GetKey 获取单个代理密钥的只读副本
+func (m *Manager) GetKey(id string) (*ProxyKey, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	key, exists := m.keys[id]
+	if !exists {
+		return nil, false
+	}
+
+	keyCopy := *key
+	if key.AllowedGroups != nil {
+		keyCopy.AllowedGroups = append([]string(nil), key.AllowedGroups...)
+	}
+	if key.GroupSelectionConfig != nil {
+		configCopy := *key.GroupSelectionConfig
+		if key.GroupSelectionConfig.GroupWeights != nil {
+			configCopy.GroupWeights = append([]GroupWeight(nil), key.GroupSelectionConfig.GroupWeights...)
+		}
+		keyCopy.GroupSelectionConfig = &configCopy
+	}
+
+	return &keyCopy, true
 }
 
 // DeleteKey 删除代理密钥

@@ -2665,11 +2665,14 @@ func (s *MultiProviderServer) handleProxyKeys(c *gin.Context) {
 // handleGenerateProxyKey 处理生成代理密钥
 func (s *MultiProviderServer) handleGenerateProxyKey(c *gin.Context) {
 	var req struct {
-		Name                 string                         `json:"name" binding:"required"`
-		Description          string                         `json:"description"`
-		AllowedGroups        []string                       `json:"allowedGroups"`        // 允许访问的分组ID列表
-		GroupSelectionConfig *proxykey.GroupSelectionConfig `json:"groupSelectionConfig"` // 分组选择配置
-		EnforceModelMappings bool                           `json:"enforceModelMappings"`
+		Name                       string                         `json:"name" binding:"required"`
+		Description                string                         `json:"description"`
+		AllowedGroups              []string                       `json:"allowedGroups"`          // 允许访问的分组ID列表
+		AllowedGroupsLegacy        []string                       `json:"allowed_groups"`         // 兼容旧字段名
+		GroupSelectionConfig       *proxykey.GroupSelectionConfig `json:"groupSelectionConfig"`   // 分组选择配置
+		GroupSelectionConfigLegacy *proxykey.GroupSelectionConfig `json:"group_selection_config"` // 兼容旧字段名
+		EnforceModelMappings       *bool                          `json:"enforceModelMappings"`
+		EnforceModelMappingsLegacy *bool                          `json:"enforce_model_mappings"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -2679,7 +2682,27 @@ func (s *MultiProviderServer) handleGenerateProxyKey(c *gin.Context) {
 		return
 	}
 
-	key, err := s.proxyKeyManager.GenerateKeyWithPolicy(req.Name, req.Description, req.AllowedGroups, req.GroupSelectionConfig, req.EnforceModelMappings)
+	allowedGroups := req.AllowedGroups
+	if allowedGroups == nil {
+		allowedGroups = req.AllowedGroupsLegacy
+	}
+	if allowedGroups == nil {
+		allowedGroups = []string{}
+	}
+
+	groupSelectionConfig := req.GroupSelectionConfig
+	if groupSelectionConfig == nil {
+		groupSelectionConfig = req.GroupSelectionConfigLegacy
+	}
+
+	enforceModelMappings := false
+	if req.EnforceModelMappings != nil {
+		enforceModelMappings = *req.EnforceModelMappings
+	} else if req.EnforceModelMappingsLegacy != nil {
+		enforceModelMappings = *req.EnforceModelMappingsLegacy
+	}
+
+	key, err := s.proxyKeyManager.GenerateKeyWithPolicy(req.Name, req.Description, allowedGroups, groupSelectionConfig, enforceModelMappings)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to generate key",
@@ -2698,12 +2721,15 @@ func (s *MultiProviderServer) handleUpdateProxyKey(c *gin.Context) {
 	keyID := c.Param("id")
 
 	var req struct {
-		Name                 string                         `json:"name" binding:"required"`
-		Description          string                         `json:"description"`
-		IsActive             *bool                          `json:"is_active"`
-		AllowedGroups        []string                       `json:"allowedGroups"`        // 保持与生成时一致的字段名
-		GroupSelectionConfig *proxykey.GroupSelectionConfig `json:"groupSelectionConfig"` // 分组选择配置
-		EnforceModelMappings bool                           `json:"enforceModelMappings"`
+		Name                       string                         `json:"name" binding:"required"`
+		Description                string                         `json:"description"`
+		IsActive                   *bool                          `json:"is_active"`
+		AllowedGroups              []string                       `json:"allowedGroups"`          // 当前前端字段名
+		AllowedGroupsLegacy        []string                       `json:"allowed_groups"`         // 兼容旧字段名
+		GroupSelectionConfig       *proxykey.GroupSelectionConfig `json:"groupSelectionConfig"`   // 分组选择配置
+		GroupSelectionConfigLegacy *proxykey.GroupSelectionConfig `json:"group_selection_config"` // 兼容旧字段名
+		EnforceModelMappings       *bool                          `json:"enforceModelMappings"`
+		EnforceModelMappingsLegacy *bool                          `json:"enforce_model_mappings"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -2713,19 +2739,49 @@ func (s *MultiProviderServer) handleUpdateProxyKey(c *gin.Context) {
 		return
 	}
 
-	// 如果没有提供 IsActive，默认为 true
-	isActive := true
+	existingKey, exists := s.proxyKeyManager.GetKey(keyID)
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "Key not found",
+		})
+		return
+	}
+
+	// 未提供时保留旧值，避免旧前端/缓存页面把可选字段重置掉
+	isActive := existingKey.IsActive
 	if req.IsActive != nil {
 		isActive = *req.IsActive
 	}
 
-	// 如果没有提供 AllowedGroups，默认为空数组
-	allowedGroups := req.AllowedGroups
-	if allowedGroups == nil {
-		allowedGroups = []string{}
+	allowedGroups := existingKey.AllowedGroups
+	switch {
+	case req.AllowedGroups != nil:
+		allowedGroups = req.AllowedGroups
+	case req.AllowedGroupsLegacy != nil:
+		allowedGroups = req.AllowedGroupsLegacy
 	}
 
-	if err := s.proxyKeyManager.UpdateKeyWithPolicy(keyID, req.Name, req.Description, isActive, allowedGroups, req.GroupSelectionConfig, req.EnforceModelMappings); err != nil {
+	groupSelectionConfig := req.GroupSelectionConfig
+	if groupSelectionConfig == nil {
+		groupSelectionConfig = req.GroupSelectionConfigLegacy
+	}
+
+	enforceModelMappings := existingKey.EnforceModelMappings
+	if req.EnforceModelMappings != nil {
+		enforceModelMappings = *req.EnforceModelMappings
+	} else if req.EnforceModelMappingsLegacy != nil {
+		enforceModelMappings = *req.EnforceModelMappingsLegacy
+	}
+
+	log.Printf(
+		"handleUpdateProxyKey: id=%s is_active=%t enforce_model_mappings=%t allowed_groups=%v",
+		keyID,
+		isActive,
+		enforceModelMappings,
+		allowedGroups,
+	)
+
+	if err := s.proxyKeyManager.UpdateKeyWithPolicy(keyID, req.Name, req.Description, isActive, allowedGroups, groupSelectionConfig, enforceModelMappings); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": err.Error(),
 		})

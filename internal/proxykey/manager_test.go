@@ -236,3 +236,43 @@ func TestManager_ValidateKeyReturnsEnforceModelMappings(t *testing.T) {
 		t.Fatalf("ValidateKey() EnforceModelMappings = false, want true")
 	}
 }
+
+func TestManager_GetKeyReturnsCopy(t *testing.T) {
+	m := &Manager{
+		keys: map[string]*ProxyKey{
+			"k1": {
+				ID:                   "k1",
+				Key:                  "secret",
+				Name:                 "key-1",
+				Description:          "desc",
+				AllowedGroups:        []string{"g1", "g2"},
+				IsActive:             true,
+				EnforceModelMappings: true,
+				GroupSelectionConfig: &GroupSelectionConfig{
+					Strategy: GroupSelectionWeighted,
+					GroupWeights: []GroupWeight{
+						{GroupID: "g1", Weight: 3},
+						{GroupID: "g2", Weight: 1},
+					},
+				},
+			},
+		},
+		groupSelectors: make(map[string]*GroupSelector),
+	}
+
+	key, ok := m.GetKey("k1")
+	if !ok {
+		t.Fatalf("GetKey() ok = false, want true")
+	}
+
+	key.AllowedGroups[0] = "changed"
+	key.GroupSelectionConfig.GroupWeights[0].Weight = 99
+
+	original := m.keys["k1"]
+	if original.AllowedGroups[0] != "g1" {
+		t.Fatalf("GetKey() should return copy of AllowedGroups, got %v", original.AllowedGroups)
+	}
+	if original.GroupSelectionConfig.GroupWeights[0].Weight != 3 {
+		t.Fatalf("GetKey() should return copy of GroupWeights, got %+v", original.GroupSelectionConfig.GroupWeights)
+	}
+}
