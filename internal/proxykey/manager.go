@@ -47,6 +47,7 @@ type ProxyKey struct {
 	LastUsed             time.Time             `json:"last_used"`
 	UsageCount           int64                 `json:"usage_count"`
 	IsActive             bool                  `json:"is_active"`
+	EnforceModelMappings bool                  `json:"enforce_model_mappings"`
 }
 
 // ConfigProvider 配置提供者接口
@@ -123,14 +124,15 @@ func (m *Manager) loadKeysFromDB() error {
 	for _, dbKey := range dbKeys {
 		// 转换数据库模型到内存模型
 		key := &ProxyKey{
-			ID:            dbKey.ID,
-			Key:           dbKey.Key,
-			Name:          dbKey.Name,
-			Description:   dbKey.Description,
-			AllowedGroups: dbKey.AllowedGroups,
-			CreatedAt:     dbKey.CreatedAt,
-			IsActive:      dbKey.IsActive,
-			UsageCount:    dbKey.UsageCount, // 添加使用次数字段
+			ID:                   dbKey.ID,
+			Key:                  dbKey.Key,
+			Name:                 dbKey.Name,
+			Description:          dbKey.Description,
+			AllowedGroups:        dbKey.AllowedGroups,
+			EnforceModelMappings: dbKey.EnforceModelMappings,
+			CreatedAt:            dbKey.CreatedAt,
+			IsActive:             dbKey.IsActive,
+			UsageCount:           dbKey.UsageCount, // 添加使用次数字段
 		}
 
 		// 解析分组选择配置
@@ -178,11 +180,16 @@ func (m *Manager) loadKeysFromDB() error {
 
 // GenerateKey 生成新的代理API密钥
 func (m *Manager) GenerateKey(name, description string, allowedGroups []string) (*ProxyKey, error) {
-	return m.GenerateKeyWithConfig(name, description, allowedGroups, nil)
+	return m.GenerateKeyWithPolicy(name, description, allowedGroups, nil, false)
 }
 
 // GenerateKeyWithConfig 生成带分组选择配置的代理API密钥
 func (m *Manager) GenerateKeyWithConfig(name, description string, allowedGroups []string, groupSelectionConfig *GroupSelectionConfig) (*ProxyKey, error) {
+	return m.GenerateKeyWithPolicy(name, description, allowedGroups, groupSelectionConfig, false)
+}
+
+// GenerateKeyWithPolicy 生成带模型映射策略的代理API密钥
+func (m *Manager) GenerateKeyWithPolicy(name, description string, allowedGroups []string, groupSelectionConfig *GroupSelectionConfig, enforceModelMappings bool) (*ProxyKey, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -225,6 +232,7 @@ func (m *Manager) GenerateKeyWithConfig(name, description string, allowedGroups 
 		Description:          description,
 		AllowedGroups:        allowedGroups,
 		GroupSelectionConfig: groupSelectionConfig,
+		EnforceModelMappings: enforceModelMappings,
 		CreatedAt:            now,
 		IsActive:             true,
 	}
@@ -247,6 +255,7 @@ func (m *Manager) GenerateKeyWithConfig(name, description string, allowedGroups 
 			AllowedGroups:        allowedGroups,
 			GroupSelectionConfig: groupSelectionConfigJSON,
 			IsActive:             true,
+			EnforceModelMappings: enforceModelMappings,
 			CreatedAt:            now,
 			UpdatedAt:            now,
 		}
@@ -285,14 +294,15 @@ func (m *Manager) ValidateKey(keyStr string) (interface{}, bool) {
 		if key.Key == keyStr && key.IsActive {
 			// 返回logger.ProxyKey类型以便认证中间件使用
 			dbKey := &logger.ProxyKey{
-				ID:            key.ID,
-				Name:          key.Name,
-				Description:   key.Description,
-				Key:           key.Key,
-				AllowedGroups: key.AllowedGroups,
-				IsActive:      key.IsActive,
-				CreatedAt:     key.CreatedAt,
-				UpdatedAt:     key.CreatedAt,
+				ID:                   key.ID,
+				Name:                 key.Name,
+				Description:          key.Description,
+				Key:                  key.Key,
+				AllowedGroups:        key.AllowedGroups,
+				IsActive:             key.IsActive,
+				EnforceModelMappings: key.EnforceModelMappings,
+				CreatedAt:            key.CreatedAt,
+				UpdatedAt:            key.CreatedAt,
 			}
 			if !key.LastUsed.IsZero() {
 				dbKey.LastUsedAt = &key.LastUsed
@@ -327,14 +337,15 @@ func (m *Manager) ValidateKeyForGroup(keyStr, groupID string) (interface{}, bool
 
 			// 返回logger.ProxyKey类型以便认证中间件使用
 			dbKey := &logger.ProxyKey{
-				ID:            key.ID,
-				Name:          key.Name,
-				Description:   key.Description,
-				Key:           key.Key,
-				AllowedGroups: key.AllowedGroups,
-				IsActive:      key.IsActive,
-				CreatedAt:     key.CreatedAt,
-				UpdatedAt:     key.CreatedAt,
+				ID:                   key.ID,
+				Name:                 key.Name,
+				Description:          key.Description,
+				Key:                  key.Key,
+				AllowedGroups:        key.AllowedGroups,
+				IsActive:             key.IsActive,
+				EnforceModelMappings: key.EnforceModelMappings,
+				CreatedAt:            key.CreatedAt,
+				UpdatedAt:            key.CreatedAt,
 			}
 			if !key.LastUsed.IsZero() {
 				dbKey.LastUsedAt = &key.LastUsed
@@ -405,11 +416,16 @@ func (m *Manager) DeleteKey(id string) error {
 
 // UpdateKey 更新代理密钥信息
 func (m *Manager) UpdateKey(id string, name, description string, isActive bool, allowedGroups []string) error {
-	return m.UpdateKeyWithConfig(id, name, description, isActive, allowedGroups, nil)
+	return m.UpdateKeyWithPolicy(id, name, description, isActive, allowedGroups, nil, false)
 }
 
 // UpdateKeyWithConfig 更新带分组选择配置的代理密钥信息
 func (m *Manager) UpdateKeyWithConfig(id string, name, description string, isActive bool, allowedGroups []string, groupSelectionConfig *GroupSelectionConfig) error {
+	return m.UpdateKeyWithPolicy(id, name, description, isActive, allowedGroups, groupSelectionConfig, false)
+}
+
+// UpdateKeyWithPolicy 更新带模型映射策略的代理密钥信息
+func (m *Manager) UpdateKeyWithPolicy(id string, name, description string, isActive bool, allowedGroups []string, groupSelectionConfig *GroupSelectionConfig, enforceModelMappings bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -430,6 +446,7 @@ func (m *Manager) UpdateKeyWithConfig(id string, name, description string, isAct
 	key.Description = description
 	key.IsActive = isActive
 	key.AllowedGroups = allowedGroups
+	key.EnforceModelMappings = enforceModelMappings
 	if groupSelectionConfig != nil {
 		key.GroupSelectionConfig = groupSelectionConfig
 	}
@@ -452,6 +469,7 @@ func (m *Manager) UpdateKeyWithConfig(id string, name, description string, isAct
 			AllowedGroups:        allowedGroups,
 			GroupSelectionConfig: groupSelectionConfigJSON,
 			IsActive:             isActive,
+			EnforceModelMappings: enforceModelMappings,
 			CreatedAt:            key.CreatedAt,
 			UpdatedAt:            time.Now(),
 		}
@@ -623,6 +641,7 @@ func (m *Manager) persistKeyLocked(key *ProxyKey) error {
 		AllowedGroups:        key.AllowedGroups,
 		GroupSelectionConfig: groupSelectionConfigJSON,
 		IsActive:             key.IsActive,
+		EnforceModelMappings: key.EnforceModelMappings,
 		UsageCount:           key.UsageCount,
 		CreatedAt:            key.CreatedAt,
 		UpdatedAt:            time.Now(),

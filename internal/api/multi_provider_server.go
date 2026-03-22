@@ -408,48 +408,34 @@ func (s *MultiProviderServer) handleOpenAIModels(c *gin.Context, proxyKey *logge
 		return groups
 	}())
 
-	// 根据代理密钥权限和查询参数过滤分组
-	var accessibleGroups map[string]*internal.UserGroup
+	accessibleGroups, err := s.getAccessibleGroupsForProxyKey(proxyKey, enabledGroups, groupID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": gin.H{
+				"message": err.Error(),
+				"type":    "not_found",
+				"code":    "group_not_found",
+			},
+		})
+		return
+	}
 
-	if groupID != "" {
-		// 如果指定了特定分组，只返回该分组的模型
-		if group, exists := enabledGroups[groupID]; exists {
-			accessibleGroups = map[string]*internal.UserGroup{groupID: group}
-		} else {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": gin.H{
-					"message": fmt.Sprintf("Provider group '%s' not found", groupID),
-					"type":    "not_found",
-					"code":    "group_not_found",
-				},
-			})
-			return
-		}
-	} else {
-		// 根据代理密钥权限过滤分组
-		accessibleGroups = make(map[string]*internal.UserGroup)
-
-		if len(proxyKey.AllowedGroups) == 0 {
-			// 如果没有限制，可以访问所有启用的分组
-			accessibleGroups = enabledGroups
-		} else {
-			// 只包含有权限访问的分组
-			for _, allowedGroupID := range proxyKey.AllowedGroups {
-				if group, exists := enabledGroups[allowedGroupID]; exists {
-					accessibleGroups[allowedGroupID] = group
-				}
-			}
-		}
+	hiddenOriginalModels := map[string]struct{}{}
+	if proxyKey.EnforceModelMappings {
+		hiddenOriginalModels = s.collectMappedOriginalModels(accessibleGroups)
 	}
 
 	// 收集所有可访问分组的模型，使用map进行去重
 	modelMap := make(map[string]map[string]interface{})
 
 	for currentGroupID, group := range accessibleGroups {
-		models := s.getModelsForGroup(currentGroupID, group)
+		models := s.getModelsForGroup(currentGroupID, group, proxyKey.EnforceModelMappings)
 		// 将模型添加到map中，以id为key进行去重
 		for _, model := range models {
 			if id, ok := model["id"].(string); ok {
+				if proxyKey.EnforceModelMappings && s.shouldHideMappedOriginalModel(id, model, hiddenOriginalModels) {
+					continue
+				}
 				modelMap[id] = model
 			}
 		}
@@ -468,8 +454,52 @@ func (s *MultiProviderServer) handleOpenAIModels(c *gin.Context, proxyKey *logge
 	})
 }
 
+func (s *MultiProviderServer) getAccessibleGroupsForProxyKey(proxyKey *logger.ProxyKey, enabledGroups map[string]*internal.UserGroup, groupID string) (map[string]*internal.UserGroup, error) {
+	if groupID != "" {
+		group, exists := enabledGroups[groupID]
+		if !exists {
+			return nil, fmt.Errorf("Provider group '%s' not found", groupID)
+		}
+		return map[string]*internal.UserGroup{groupID: group}, nil
+	}
+
+	if len(proxyKey.AllowedGroups) == 0 {
+		return enabledGroups, nil
+	}
+
+	accessibleGroups := make(map[string]*internal.UserGroup)
+	for _, allowedGroupID := range proxyKey.AllowedGroups {
+		if group, exists := enabledGroups[allowedGroupID]; exists {
+			accessibleGroups[allowedGroupID] = group
+		}
+	}
+
+	return accessibleGroups, nil
+}
+
+func (s *MultiProviderServer) collectMappedOriginalModels(groups map[string]*internal.UserGroup) map[string]struct{} {
+	hiddenOriginalModels := make(map[string]struct{})
+	for _, group := range groups {
+		for _, originalModel := range group.ModelMappings {
+			hiddenOriginalModels[originalModel] = struct{}{}
+		}
+	}
+	return hiddenOriginalModels
+}
+
+func (s *MultiProviderServer) shouldHideMappedOriginalModel(modelID string, model map[string]interface{}, hiddenOriginalModels map[string]struct{}) bool {
+	if modelID == "" {
+		return false
+	}
+	if isAlias, ok := model["is_alias"].(bool); ok && isAlias {
+		return false
+	}
+	_, hidden := hiddenOriginalModels[modelID]
+	return hidden
+}
+
 // getModelsForGroup 获取指定分组的模型列表
-func (s *MultiProviderServer) getModelsForGroup(groupID string, group *internal.UserGroup) []map[string]interface{} {
+func (s *MultiProviderServer) getModelsForGroup(groupID string, group *internal.UserGroup, enforceModelMappings bool) []map[string]interface{} {
 	var models []map[string]interface{}
 
 	// 如果分组配置了特定的模型列表，使用配置的模型
@@ -485,7 +515,7 @@ func (s *MultiProviderServer) getModelsForGroup(groupID string, group *internal.
 		}
 
 		// 应用模型别名映射
-		models = s.applyModelMappings(models, group)
+		models = s.applyModelMappings(models, group, enforceModelMappings)
 		return models
 	}
 
@@ -509,7 +539,7 @@ func (s *MultiProviderServer) getModelsForGroup(groupID string, group *internal.
 	}
 
 	// 应用模型别名映射
-	models = s.applyModelMappings(models, group)
+	models = s.applyModelMappings(models, group, enforceModelMappings)
 	return models
 }
 
@@ -788,7 +818,7 @@ func (s *MultiProviderServer) hasGroupAccess(proxyKey *logger.ProxyKey, groupID 
 }
 
 // applyModelMappings 应用模型别名映射到模型列表
-func (s *MultiProviderServer) applyModelMappings(models []map[string]interface{}, group *internal.UserGroup) []map[string]interface{} {
+func (s *MultiProviderServer) applyModelMappings(models []map[string]interface{}, group *internal.UserGroup, enforceModelMappings bool) []map[string]interface{} {
 	if len(group.ModelMappings) == 0 {
 		return models
 	}
@@ -819,19 +849,23 @@ func (s *MultiProviderServer) applyModelMappings(models []map[string]interface{}
 					aliasModel[k] = v
 				}
 				aliasModel["id"] = alias
-				aliasModel["original_model"] = modelID
 				aliasModel["is_alias"] = true
+				if !enforceModelMappings {
+					aliasModel["original_model"] = modelID
+				}
 				enhancedModels = append(enhancedModels, aliasModel)
 			}
 
-			// 同时保留原始模型
-			originalModel := make(map[string]interface{})
-			for k, v := range model {
-				originalModel[k] = v
+			if !enforceModelMappings {
+				// 同时保留原始模型
+				originalModel := make(map[string]interface{})
+				for k, v := range model {
+					originalModel[k] = v
+				}
+				originalModel["has_aliases"] = aliases
+				originalModel["is_original"] = true
+				enhancedModels = append(enhancedModels, originalModel)
 			}
-			originalModel["has_aliases"] = aliases
-			originalModel["is_original"] = true
-			enhancedModels = append(enhancedModels, originalModel)
 		} else {
 			// 没有别名的模型直接添加
 			enhancedModels = append(enhancedModels, model)
@@ -852,13 +886,15 @@ func (s *MultiProviderServer) applyModelMappings(models []map[string]interface{}
 		// 如果原始模型不在当前列表中，创建一个别名条目
 		if !found {
 			aliasModel := map[string]interface{}{
-				"id":             alias,
-				"object":         "model",
-				"created":        1640995200,
-				"owned_by":       s.getOwnerByModelID(originalModel),
-				"original_model": originalModel,
-				"is_alias":       true,
-				"cross_group":    true, // 标记为跨分组映射
+				"id":          alias,
+				"object":      "model",
+				"created":     1640995200,
+				"owned_by":    s.getOwnerByModelID(originalModel),
+				"is_alias":    true,
+				"cross_group": true, // 标记为跨分组映射
+			}
+			if !enforceModelMappings {
+				aliasModel["original_model"] = originalModel
 			}
 			enhancedModels = append(enhancedModels, aliasModel)
 		}
@@ -2633,6 +2669,7 @@ func (s *MultiProviderServer) handleGenerateProxyKey(c *gin.Context) {
 		Description          string                         `json:"description"`
 		AllowedGroups        []string                       `json:"allowedGroups"`        // 允许访问的分组ID列表
 		GroupSelectionConfig *proxykey.GroupSelectionConfig `json:"groupSelectionConfig"` // 分组选择配置
+		EnforceModelMappings bool                           `json:"enforceModelMappings"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -2642,7 +2679,7 @@ func (s *MultiProviderServer) handleGenerateProxyKey(c *gin.Context) {
 		return
 	}
 
-	key, err := s.proxyKeyManager.GenerateKeyWithConfig(req.Name, req.Description, req.AllowedGroups, req.GroupSelectionConfig)
+	key, err := s.proxyKeyManager.GenerateKeyWithPolicy(req.Name, req.Description, req.AllowedGroups, req.GroupSelectionConfig, req.EnforceModelMappings)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to generate key",
@@ -2666,6 +2703,7 @@ func (s *MultiProviderServer) handleUpdateProxyKey(c *gin.Context) {
 		IsActive             *bool                          `json:"is_active"`
 		AllowedGroups        []string                       `json:"allowedGroups"`        // 保持与生成时一致的字段名
 		GroupSelectionConfig *proxykey.GroupSelectionConfig `json:"groupSelectionConfig"` // 分组选择配置
+		EnforceModelMappings bool                           `json:"enforceModelMappings"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -2687,7 +2725,7 @@ func (s *MultiProviderServer) handleUpdateProxyKey(c *gin.Context) {
 		allowedGroups = []string{}
 	}
 
-	if err := s.proxyKeyManager.UpdateKeyWithConfig(keyID, req.Name, req.Description, isActive, allowedGroups, req.GroupSelectionConfig); err != nil {
+	if err := s.proxyKeyManager.UpdateKeyWithPolicy(keyID, req.Name, req.Description, isActive, allowedGroups, req.GroupSelectionConfig, req.EnforceModelMappings); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": err.Error(),
 		})
@@ -3760,9 +3798,9 @@ func (s *MultiProviderServer) handleGeminiNativeModels(c *gin.Context) {
 		return
 	}
 
-	// 获取可访问的分组
-	allowedGroups := keyInfoStruct.AllowedGroups
-	if len(allowedGroups) == 0 {
+	enabledGroups := s.proxy.GetProviderRouter().GetAvailableGroups()
+	accessibleGroups, err := s.getAccessibleGroupsForProxyKey(keyInfoStruct, enabledGroups, "")
+	if err != nil || len(accessibleGroups) == 0 {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error": gin.H{
 				"message": "No accessible groups",
@@ -3772,28 +3810,40 @@ func (s *MultiProviderServer) handleGeminiNativeModels(c *gin.Context) {
 		return
 	}
 
+	hiddenOriginalModels := map[string]struct{}{}
+	if keyInfoStruct.EnforceModelMappings {
+		hiddenOriginalModels = s.collectMappedOriginalModels(accessibleGroups)
+	}
+
 	// 收集所有Gemini模型
 	var geminiModels []map[string]interface{}
+	seenModels := make(map[string]struct{})
 
-	for _, groupID := range allowedGroups {
-		group, exists := s.configManager.GetConfig().UserGroups[groupID]
-		if !exists || !group.Enabled {
-			continue
-		}
-
-		// 只处理Gemini提供商
+	for groupID, group := range accessibleGroups {
 		if group.ProviderType != "gemini" {
 			continue
 		}
 
-		// 获取分组的模型列表
-		for _, model := range group.Models {
+		models := s.getModelsForGroup(groupID, group, keyInfoStruct.EnforceModelMappings)
+		for _, model := range models {
+			modelID, ok := model["id"].(string)
+			if !ok || modelID == "" {
+				continue
+			}
+			if keyInfoStruct.EnforceModelMappings && s.shouldHideMappedOriginalModel(modelID, model, hiddenOriginalModels) {
+				continue
+			}
+			if _, exists := seenModels[modelID]; exists {
+				continue
+			}
+			seenModels[modelID] = struct{}{}
+
 			geminiModel := map[string]interface{}{
-				"name":                       fmt.Sprintf("models/%s", model),
-				"baseModelId":                model,
+				"name":                       fmt.Sprintf("models/%s", modelID),
+				"baseModelId":                modelID,
 				"version":                    "001",
-				"displayName":                model,
-				"description":                fmt.Sprintf("Google %s model", model),
+				"displayName":                modelID,
+				"description":                fmt.Sprintf("Google %s model", modelID),
 				"inputTokenLimit":            1048576, // 1M tokens
 				"outputTokenLimit":           8192,
 				"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent"},

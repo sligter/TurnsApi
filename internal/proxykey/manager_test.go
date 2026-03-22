@@ -1,6 +1,11 @@
 package proxykey
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"turnsapi/internal/logger"
+)
 
 type stubConfigProvider struct {
 	enabledGroups map[string]interface{}
@@ -199,5 +204,35 @@ func TestManager_SelectGroupForKey_UnrestrictedFallsBackToSortedFirstGroup(t *te
 	}
 	if got != "cerebras" {
 		t.Fatalf("SelectGroupForKey() = %s, want cerebras", got)
+	}
+}
+
+func TestManager_ValidateKeyReturnsEnforceModelMappings(t *testing.T) {
+	now := time.Now()
+	m := &Manager{
+		keys: map[string]*ProxyKey{
+			"k1": {
+				ID:                   "k1",
+				Key:                  "secret",
+				Name:                 "key-1",
+				IsActive:             true,
+				EnforceModelMappings: true,
+				CreatedAt:            now,
+			},
+		},
+		groupSelectors: make(map[string]*GroupSelector),
+	}
+
+	got, ok := m.ValidateKey("secret")
+	if !ok {
+		t.Fatalf("ValidateKey() ok = false, want true")
+	}
+
+	dbKey, ok := got.(*logger.ProxyKey)
+	if !ok {
+		t.Fatalf("ValidateKey() type = %T, want *logger.ProxyKey", got)
+	}
+	if !dbKey.EnforceModelMappings {
+		t.Fatalf("ValidateKey() EnforceModelMappings = false, want true")
 	}
 }

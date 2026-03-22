@@ -3551,6 +3551,36 @@
                                 </div>
                             </div>
 
+                            <div class="mb-6">
+                                <h5
+                                    class="text-sm font-medium text-gray-800 mb-3"
+                                >
+                                    模型映射策略
+                                </h5>
+                                <div
+                                    class="bg-white rounded-lg border border-gray-200 p-4"
+                                >
+                                    <label class="flex items-start space-x-3">
+                                        <input
+                                            type="checkbox"
+                                            x-model="newProxyKey.enforceModelMappings"
+                                            class="mt-1 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                        />
+                                        <span class="block">
+                                            <span
+                                                class="block text-sm font-medium text-gray-700"
+                                                >仅允许重命名模型</span
+                                            >
+                                            <span
+                                                class="block text-xs text-gray-500 mt-1"
+                                            >
+                                                开启后，如果当前密钥可访问的分组里有模型配置了重命名，则只能使用重命名后的名称，原模型名不会显示也不能调用。
+                                            </span>
+                                        </span>
+                                    </label>
+                                </div>
+                            </div>
+
                             <!-- 分组间请求设置 -->
                             <div
                                 x-show="newProxyKey.allowedGroups.length > 1 || newProxyKey.allowedGroups.length === 0"
@@ -3792,6 +3822,18 @@
                                                     class="text-sm text-gray-500"
                                                     x-text="key.description"
                                                 ></div>
+                                                <div class="mt-2">
+                                                    <span
+                                                        x-show="key.enforce_model_mappings"
+                                                        class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800"
+                                                        >仅重命名模型</span
+                                                    >
+                                                    <span
+                                                        x-show="!key.enforce_model_mappings"
+                                                        class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600"
+                                                        >原模型可用</span
+                                                    >
+                                                </div>
                                             </td>
                                             <td
                                                 class="px-6 py-4 whitespace-nowrap"
@@ -4098,6 +4140,38 @@
                                             </div>
                                         </div>
 
+                                        <div class="bg-gray-50 rounded-lg p-4">
+                                            <h4
+                                                class="text-sm font-medium text-gray-800 mb-4"
+                                            >
+                                                模型映射策略
+                                            </h4>
+                                            <div
+                                                class="bg-white rounded-lg border border-gray-200 p-3"
+                                            >
+                                                <label
+                                                    class="flex items-start space-x-3"
+                                                >
+                                                    <input
+                                                        type="checkbox"
+                                                        x-model="editingProxyKey.enforceModelMappings"
+                                                        class="mt-1 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                                    />
+                                                    <span class="block">
+                                                        <span
+                                                            class="block text-sm font-medium text-gray-700"
+                                                            >仅允许重命名模型</span
+                                                        >
+                                                        <span
+                                                            class="block text-xs text-gray-500 mt-1"
+                                                        >
+                                                            开启后，如果当前密钥可访问的分组里有模型配置了重命名，则只能使用重命名后的名称，原模型名不会显示也不能调用。
+                                                        </span>
+                                                    </span>
+                                                </label>
+                                            </div>
+                                        </div>
+
                                         <!-- 分组间请求设置 -->
                                         <div
                                             x-show="editingProxyKey.allowedGroups.length > 1 || editingProxyKey.allowedGroups.length === 0"
@@ -4305,6 +4379,7 @@
                         name: "",
                         description: "",
                         allowedGroups: [],
+                        enforceModelMappings: false,
                         groupSelectionConfig: {
                             strategy: "round_robin",
                             groupWeights: [],
@@ -4316,6 +4391,7 @@
                         description: "",
                         is_active: true,
                         allowedGroups: [],
+                        enforceModelMappings: false,
                         groupSelectionConfig: {
                             strategy: "round_robin",
                             groupWeights: [],
@@ -7465,6 +7541,8 @@
                                 name: this.newProxyKey.name,
                                 description: this.newProxyKey.description,
                                 allowedGroups: this.newProxyKey.allowedGroups,
+                                enforceModelMappings:
+                                    this.newProxyKey.enforceModelMappings,
                             };
 
                             // 如果有多个分组或空分组（访问所有分组），添加分组选择配置
@@ -7547,6 +7625,7 @@
                             name: "",
                             description: "",
                             allowedGroups: [],
+                            enforceModelMappings: false,
                             groupSelectionConfig: {
                                 strategy: "round_robin",
                                 groupWeights: [],
@@ -7587,6 +7666,8 @@
                             allowedGroups: key.allowed_groups
                                 ? [...key.allowed_groups]
                                 : [],
+                            enforceModelMappings:
+                                key.enforce_model_mappings === true,
                             groupSelectionConfig: key.group_selection_config
                                 ? {
                                       strategy:
@@ -7616,6 +7697,7 @@
                             description: "",
                             is_active: true,
                             allowedGroups: [],
+                            enforceModelMappings: false,
                             groupSelectionConfig: {
                                 strategy: "round_robin",
                                 groupWeights: [],
@@ -7662,6 +7744,8 @@
                                 is_active: this.editingProxyKey.is_active,
                                 allowedGroups:
                                     this.editingProxyKey.allowedGroups,
+                                enforceModelMappings:
+                                    this.editingProxyKey.enforceModelMappings,
                             };
 
                             // 如果有多个分组或空分组（访问所有分组），添加分组选择配置

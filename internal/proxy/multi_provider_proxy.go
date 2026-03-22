@@ -402,18 +402,21 @@ func (p *MultiProviderProxy) HandleChatCompletion(c *gin.Context) {
 	// 获取代理密钥信息以检查权限
 	var allowedGroups []string
 	var proxyKeyID string
+	var enforceModelMappings bool
 	if keyInfo, exists := c.Get("key_info"); exists {
 		if proxyKey, ok := keyInfo.(*logger.ProxyKey); ok {
 			allowedGroups = proxyKey.AllowedGroups
 			proxyKeyID = proxyKey.ID
+			enforceModelMappings = proxyKey.EnforceModelMappings
 		}
 	}
 
 	// 路由到合适的提供商
 	routeReq := &router.RouteRequest{
-		Model:         req.Model,
-		AllowedGroups: allowedGroups, // 传递代理密钥的权限限制
-		ProxyKeyID:    proxyKeyID,    // 传递代理密钥ID用于分组选择
+		Model:                req.Model,
+		AllowedGroups:        allowedGroups, // 传递代理密钥的权限限制
+		ProxyKeyID:           proxyKeyID,    // 传递代理密钥ID用于分组选择
+		EnforceModelMappings: enforceModelMappings,
 	}
 
 	// 检查是否有显式指定的提供商分组
@@ -474,7 +477,7 @@ func (p *MultiProviderProxy) handleRequestWithSmartFailover(
 		return p.tryGroupRotationWithLimit(c, req, routeReq, orderedGroups, startTime, 3)
 	}
 	// 获取支持该模型的所有分组
-	candidateGroups := p.providerRouter.GetGroupsForModel(req.Model, routeReq.AllowedGroups)
+	candidateGroups := p.providerRouter.GetGroupsForModel(req.Model, routeReq.AllowedGroups, routeReq.EnforceModelMappings)
 	if len(candidateGroups) == 0 {
 		log.Printf("没有可用分组支持模型 %s", req.Model)
 		return false
@@ -500,6 +503,12 @@ func (p *MultiProviderProxy) buildGroupRotationKey(model string, routeReq *route
 	b.WriteString(routeReq.ProviderGroup)
 	b.WriteString("|forced-provider:")
 	b.WriteString(routeReq.ForceProviderType)
+	b.WriteString("|enforce-model-mappings:")
+	if routeReq.EnforceModelMappings {
+		b.WriteString("true")
+	} else {
+		b.WriteString("false")
+	}
 	b.WriteString("|allowed:")
 	b.WriteString(strings.Join(routeReq.AllowedGroups, ","))
 	b.WriteString("|candidates:")
@@ -665,11 +674,12 @@ func (p *MultiProviderProxy) tryGroupRotationWithLimit(
 					totalAttempts, maxRetries, groupID, attemptsByGroup[groupID], p.maskKey(apiKey))
 
 				groupRouteReq := &router.RouteRequest{
-					Model:             req.Model,
-					ProviderGroup:     groupID,
-					AllowedGroups:     routeReq.AllowedGroups,
-					ProxyKeyID:        routeReq.ProxyKeyID,
-					ForceProviderType: routeReq.ForceProviderType,
+					Model:                req.Model,
+					ProviderGroup:        groupID,
+					AllowedGroups:        routeReq.AllowedGroups,
+					ProxyKeyID:           routeReq.ProxyKeyID,
+					ForceProviderType:    routeReq.ForceProviderType,
+					EnforceModelMappings: routeReq.EnforceModelMappings,
 				}
 
 				routeResult, err := p.providerRouter.RouteWithRetry(groupRouteReq)
@@ -817,10 +827,11 @@ func (p *MultiProviderProxy) tryGroupRotationWithLimit(
 
 			// 为该分组创建路由请求
 			groupRouteReq := &router.RouteRequest{
-				Model:         req.Model,
-				ProviderGroup: groupID,
-				AllowedGroups: routeReq.AllowedGroups,
-				ProxyKeyID:    routeReq.ProxyKeyID,
+				Model:                req.Model,
+				ProviderGroup:        groupID,
+				AllowedGroups:        routeReq.AllowedGroups,
+				ProxyKeyID:           routeReq.ProxyKeyID,
+				EnforceModelMappings: routeReq.EnforceModelMappings,
 			}
 
 			// 获取该分组的路由结果

@@ -242,6 +242,7 @@ func (d *Database) initTables() error {
 		allowed_groups TEXT, -- JSON数组，存储允许访问的分组ID
 		group_selection_config TEXT, -- JSON对象，存储分组选择配置
 		is_active BOOLEAN NOT NULL DEFAULT 1,
+		enforce_model_mappings BOOLEAN NOT NULL DEFAULT 0,
 		usage_count INTEGER NOT NULL DEFAULT 0, -- 使用次数
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -311,6 +312,7 @@ func (d *Database) initTablesPostgres() error {
 		allowed_groups TEXT,
 		group_selection_config TEXT,
 		is_active BOOLEAN NOT NULL DEFAULT TRUE,
+		enforce_model_mappings BOOLEAN NOT NULL DEFAULT FALSE,
 		usage_count BIGINT NOT NULL DEFAULT 0,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -530,8 +532,62 @@ func (d *Database) migrateDatabase() error {
 	return nil
 }
 
+func (d *Database) proxyKeysColumnExists(column string) (bool, error) {
+	if d.dialect == "postgres" {
+		var columnExists bool
+		err := d.queryRow(`
+			SELECT COUNT(*) > 0
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = 'proxy_keys'
+			  AND column_name = ?
+		`, column).Scan(&columnExists)
+		if err != nil {
+			return false, fmt.Errorf("failed to check postgres column %s: %w", column, err)
+		}
+		return columnExists, nil
+	}
+
+	var columnExists bool
+	err := d.queryRow(`
+		SELECT COUNT(*) > 0
+		FROM pragma_table_info('proxy_keys')
+		WHERE name = ?
+	`, column).Scan(&columnExists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check sqlite column %s: %w", column, err)
+	}
+	return columnExists, nil
+}
+
+func (d *Database) ensureProxyKeyPolicyColumns() error {
+	columnExists, err := d.proxyKeysColumnExists("enforce_model_mappings")
+	if err != nil {
+		return err
+	}
+	if columnExists {
+		return nil
+	}
+
+	log.Println("Adding enforce_model_mappings column to proxy_keys table...")
+	alterSQL := `ALTER TABLE proxy_keys ADD COLUMN enforce_model_mappings BOOLEAN NOT NULL DEFAULT 0`
+	if d.dialect == "postgres" {
+		alterSQL = `ALTER TABLE proxy_keys ADD COLUMN enforce_model_mappings BOOLEAN NOT NULL DEFAULT FALSE`
+	}
+	if _, err := d.exec(alterSQL); err != nil {
+		return fmt.Errorf("failed to add enforce_model_mappings column: %w", err)
+	}
+
+	log.Println("Successfully added enforce_model_mappings column")
+	return nil
+}
+
 // migrate 执行数据库迁移
 func (d *Database) migrate() error {
+	if err := d.ensureProxyKeyPolicyColumns(); err != nil {
+		return err
+	}
+
 	if d.dialect != "postgres" {
 		// 检查是否需要添加provider_group字段
 		var columnExists bool
@@ -1155,12 +1211,12 @@ func (d *Database) InsertProxyKey(key *ProxyKey) error {
 	}
 
 	query := `
-	INSERT INTO proxy_keys (id, name, description, key, allowed_groups, group_selection_config, is_active, usage_count, created_at, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO proxy_keys (id, name, description, key, allowed_groups, group_selection_config, is_active, enforce_model_mappings, usage_count, created_at, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := d.exec(query,
-		key.ID, key.Name, key.Description, key.Key, allowedGroupsJSON, key.GroupSelectionConfig, key.IsActive, key.UsageCount,
+		key.ID, key.Name, key.Description, key.Key, allowedGroupsJSON, key.GroupSelectionConfig, key.IsActive, key.EnforceModelMappings, key.UsageCount,
 		key.CreatedAt, key.UpdatedAt,
 	)
 	if err != nil {
@@ -1173,7 +1229,7 @@ func (d *Database) InsertProxyKey(key *ProxyKey) error {
 // GetProxyKey 根据密钥获取代理密钥信息
 func (d *Database) GetProxyKey(keyValue string) (*ProxyKey, error) {
 	query := `
-	SELECT id, name, description, key, allowed_groups, group_selection_config, is_active, usage_count, created_at, updated_at, last_used_at
+	SELECT id, name, description, key, allowed_groups, group_selection_config, is_active, enforce_model_mappings, usage_count, created_at, updated_at, last_used_at
 	FROM proxy_keys
 	WHERE key = ? AND is_active = TRUE
 	`
@@ -1182,7 +1238,7 @@ func (d *Database) GetProxyKey(keyValue string) (*ProxyKey, error) {
 	var allowedGroupsJSON string
 	var groupSelectionConfigJSON sql.NullString
 	err := d.queryRow(query, keyValue).Scan(
-		&key.ID, &key.Name, &key.Description, &key.Key, &allowedGroupsJSON, &groupSelectionConfigJSON, &key.IsActive,
+		&key.ID, &key.Name, &key.Description, &key.Key, &allowedGroupsJSON, &groupSelectionConfigJSON, &key.IsActive, &key.EnforceModelMappings,
 		&key.UsageCount, &key.CreatedAt, &key.UpdatedAt, &key.LastUsedAt,
 	)
 	if err != nil {
@@ -1214,7 +1270,7 @@ func (d *Database) GetProxyKey(keyValue string) (*ProxyKey, error) {
 // GetAllProxyKeys 获取所有代理密钥
 func (d *Database) GetAllProxyKeys() ([]*ProxyKey, error) {
 	query := `
-	SELECT id, name, description, key, allowed_groups, group_selection_config, is_active, usage_count, created_at, updated_at, last_used_at
+	SELECT id, name, description, key, allowed_groups, group_selection_config, is_active, enforce_model_mappings, usage_count, created_at, updated_at, last_used_at
 	FROM proxy_keys
 	ORDER BY created_at DESC
 	`
@@ -1231,7 +1287,7 @@ func (d *Database) GetAllProxyKeys() ([]*ProxyKey, error) {
 		var allowedGroupsJSON string
 		var groupSelectionConfigJSON sql.NullString
 		if err := rows.Scan(
-			&key.ID, &key.Name, &key.Description, &key.Key, &allowedGroupsJSON, &groupSelectionConfigJSON, &key.IsActive,
+			&key.ID, &key.Name, &key.Description, &key.Key, &allowedGroupsJSON, &groupSelectionConfigJSON, &key.IsActive, &key.EnforceModelMappings,
 			&key.UsageCount, &key.CreatedAt, &key.UpdatedAt, &key.LastUsedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan proxy key: %w", err)
@@ -1273,13 +1329,13 @@ func (d *Database) UpdateProxyKey(key *ProxyKey) error {
 
 	query := `
 	UPDATE proxy_keys
-	SET name = ?, description = ?, allowed_groups = ?, group_selection_config = ?, is_active = ?, usage_count = ?, updated_at = ?
+	SET name = ?, description = ?, allowed_groups = ?, group_selection_config = ?, is_active = ?, enforce_model_mappings = ?, usage_count = ?, updated_at = ?
 	WHERE id = ?
 	`
 
 	now := time.Now()
 	_, err := d.exec(query,
-		key.Name, key.Description, allowedGroupsJSON, key.GroupSelectionConfig, key.IsActive, key.UsageCount, now, key.ID,
+		key.Name, key.Description, allowedGroupsJSON, key.GroupSelectionConfig, key.IsActive, key.EnforceModelMappings, key.UsageCount, now, key.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update proxy key: %w", err)
