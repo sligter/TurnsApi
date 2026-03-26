@@ -3057,6 +3057,7 @@ func (s *MultiProviderServer) handleCreateGroup(c *gin.Context) {
 
 	// 更新RPM限制
 	s.proxy.UpdateRPMLimit(req.GroupID, rpmLimit)
+	s.refreshProxyKeySelectors()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":  true,
@@ -3288,6 +3289,7 @@ func (s *MultiProviderServer) handleUpdateGroup(c *gin.Context) {
 
 	// 更新RPM限制
 	s.proxy.UpdateRPMLimit(groupID, existingGroup.RPMLimit)
+	s.refreshProxyKeySelectors()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -3347,6 +3349,7 @@ func (s *MultiProviderServer) handleDeleteGroup(c *gin.Context) {
 			disabledProxyKeys = disabledCount
 		}
 	}
+	s.refreshProxyKeySelectors()
 
 	// 从健康检查器中移除分组
 	s.healthChecker.RemoveGroup(groupID)
@@ -3472,6 +3475,8 @@ func (s *MultiProviderServer) handleImportGroups(c *gin.Context) {
 		importedCount++
 	}
 
+	s.refreshProxyKeySelectors()
+
 	response := gin.H{
 		"success":        true,
 		"imported_count": importedCount,
@@ -3565,6 +3570,7 @@ func (s *MultiProviderServer) handleToggleGroup(c *gin.Context) {
 	if err := s.keyManager.UpdateGroupConfig(groupID, group); err != nil {
 		log.Printf("警告: 切换分组 %s 状态时更新密钥管理器失败: %v", groupID, err)
 	}
+	s.refreshProxyKeySelectors()
 
 	action := "enabled"
 	if !group.Enabled {
@@ -4004,6 +4010,13 @@ func (s *MultiProviderServer) ensureProxyKeyInfoInContext(c *gin.Context) {
 			}
 		}
 	}
+}
+
+func (s *MultiProviderServer) refreshProxyKeySelectors() {
+	if s.proxyKeyManager == nil {
+		return
+	}
+	s.proxyKeyManager.RefreshSelectors()
 }
 
 // handleChatCompletionsWithRequest 使用指定请求处理聊天完成

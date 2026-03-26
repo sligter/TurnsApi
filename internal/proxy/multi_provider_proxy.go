@@ -600,6 +600,9 @@ func (p *MultiProviderProxy) getAvailableKeyCount(groupID string) int {
 		if !status.IsActive {
 			continue
 		}
+		if status.IsValid != nil && !*status.IsValid {
+			continue
+		}
 		if !status.RateLimitUntil.IsZero() && now.Before(status.RateLimitUntil) {
 			continue
 		}
@@ -1026,6 +1029,9 @@ func (p *MultiProviderProxy) sortKeysByPriority(keyStatuses map[string]*keymanag
 	for key, status := range keyStatuses {
 		if !status.IsActive {
 			continue // 跳过非活跃密钥
+		}
+		if status.IsValid != nil && !*status.IsValid {
+			continue
 		}
 
 		// 跳过在限流冷却期内的密钥

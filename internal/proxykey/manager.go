@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -152,26 +153,7 @@ func (m *Manager) loadKeysFromDB() error {
 
 		m.keys[key.ID] = key
 		log.Printf("Loaded proxy key: %s (%s)", key.Name, key.ID)
-
-		// 初始化分组选择器（如果需要）
-		needsSelector := false
-		var selectorGroups []string
-
-		if len(key.AllowedGroups) == 0 {
-			// 空分组列表，使用所有启用的分组
-			selectorGroups = m.getSortedEnabledGroupIDs()
-			if len(selectorGroups) > 1 {
-				needsSelector = true
-			}
-		} else if len(key.AllowedGroups) > 1 {
-			// 多个指定分组
-			needsSelector = true
-			selectorGroups = key.AllowedGroups
-		}
-
-		if needsSelector && len(selectorGroups) > 1 {
-			m.groupSelectors[key.ID] = NewGroupSelector(selectorGroups, key.GroupSelectionConfig)
-		}
+		m.refreshSelectorLocked(key.ID, key)
 	}
 
 	log.Printf("Successfully loaded %d proxy keys from database", len(m.keys))
@@ -266,21 +248,8 @@ func (m *Manager) GenerateKeyWithPolicy(name, description string, allowedGroups 
 	}
 
 	m.keys[id] = key
-
-	// 初始化分组选择器（如果需要）
 	if needsGroupSelection {
-		var selectorGroups []string
-		if len(allowedGroups) == 0 {
-			// 空分组列表，使用所有启用的分组
-			selectorGroups = m.getSortedEnabledGroupIDs()
-		} else {
-			// 使用指定的分组
-			selectorGroups = allowedGroups
-		}
-
-		if len(selectorGroups) > 1 {
-			m.groupSelectors[id] = NewGroupSelector(selectorGroups, groupSelectionConfig)
-		}
+		m.refreshSelectorLocked(id, key)
 	}
 	return key, nil
 }
@@ -436,6 +405,7 @@ func (m *Manager) DeleteKey(id string) error {
 	}
 
 	delete(m.keys, id)
+	delete(m.groupSelectors, id)
 	return nil
 }
 
@@ -504,35 +474,7 @@ func (m *Manager) UpdateKeyWithPolicy(id string, name, description string, isAct
 		}
 	}
 
-	// 更新分组选择器
-	needsSelector := false
-	var selectorGroups []string
-
-	if len(allowedGroups) == 0 {
-		// 空分组列表，使用所有启用的分组
-		selectorGroups = m.getSortedEnabledGroupIDs()
-		if len(selectorGroups) > 1 {
-			needsSelector = true
-		}
-	} else if len(allowedGroups) > 1 {
-		// 多个指定分组
-		needsSelector = true
-		selectorGroups = allowedGroups
-	}
-
-	if needsSelector && len(selectorGroups) > 1 {
-		if selector, exists := m.groupSelectors[id]; exists {
-			selector.UpdateAllowedGroups(selectorGroups)
-			if groupSelectionConfig != nil {
-				selector.UpdateConfig(groupSelectionConfig)
-			}
-		} else {
-			m.groupSelectors[id] = NewGroupSelector(selectorGroups, key.GroupSelectionConfig)
-		}
-	} else {
-		// 如果不需要分组选择器，删除现有的
-		delete(m.groupSelectors, id)
-	}
+	m.refreshSelectorLocked(id, key)
 
 	log.Printf("Successfully loaded %d proxy keys from database", len(m.keys))
 	return nil
@@ -680,23 +622,27 @@ func (m *Manager) persistKeyLocked(key *ProxyKey) error {
 }
 
 func (m *Manager) refreshSelectorLocked(keyID string, key *ProxyKey) {
-	if len(key.AllowedGroups) <= 1 || !key.IsActive {
+	selectableGroups := m.selectableGroupsForKeyLocked(key)
+	if len(selectableGroups) <= 1 || !key.IsActive {
 		delete(m.groupSelectors, keyID)
 		return
 	}
 
 	if selector, exists := m.groupSelectors[keyID]; exists {
-		selector.UpdateAllowedGroups(key.AllowedGroups)
+		if selectorMatches(selector, selectableGroups, key.GroupSelectionConfig) {
+			return
+		}
+		selector.UpdateAllowedGroups(selectableGroups)
 		selector.UpdateConfig(key.GroupSelectionConfig)
 		return
 	}
 
-	m.groupSelectors[keyID] = NewGroupSelector(key.AllowedGroups, key.GroupSelectionConfig)
+	m.groupSelectors[keyID] = NewGroupSelector(selectableGroups, key.GroupSelectionConfig)
 }
 
 func (m *Manager) SelectGroupForKey(keyID string) (string, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	key, exists := m.keys[keyID]
 	if !exists {
@@ -707,43 +653,26 @@ func (m *Manager) SelectGroupForKey(keyID string) (string, error) {
 		return "", fmt.Errorf("key is not active")
 	}
 
-	// 处理空分组列表（表示可以访问所有分组）
-	if len(key.AllowedGroups) == 0 {
-		// 使用分组选择器选择分组
-		if selector, exists := m.groupSelectors[keyID]; exists {
-			return selector.SelectGroup()
-		}
-
-		// 如果没有分组选择器，从所有启用的分组中选择第一个
-		if m.configProvider != nil {
-			enabledGroups := m.getSortedEnabledGroupIDs()
-			if len(enabledGroups) > 0 {
-				groupID := enabledGroups[0]
-				return groupID, nil // 返回第一个找到的分组
-			}
-		}
-
+	selectableGroups := m.selectableGroupsForKeyLocked(key)
+	if len(selectableGroups) == 0 {
 		return "", fmt.Errorf("no enabled groups available")
 	}
-
-	if len(key.AllowedGroups) == 1 {
-		return key.AllowedGroups[0], nil
+	if len(selectableGroups) == 1 {
+		return selectableGroups[0], nil
 	}
 
-	// 使用分组选择器选择分组
-	if selector, exists := m.groupSelectors[keyID]; exists {
+	if selector := m.ensureSelectorLocked(keyID, key); selector != nil {
 		return selector.SelectGroup()
 	}
 
-	// 如果没有分组选择器，返回第一个分组
-	return key.AllowedGroups[0], nil
+	return "", fmt.Errorf("no group selector found for key")
 }
 
 // GetGroupUsageStats 获取代理密钥的分组使用统计
 // SelectGroupForKeyFromCandidates 为代理密钥在候选分组子集中选择分组。
 func (m *Manager) SelectGroupForKeyFromCandidates(keyID string, candidates []string) (string, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	key, exists := m.keys[keyID]
 	if !exists {
@@ -756,47 +685,47 @@ func (m *Manager) SelectGroupForKeyFromCandidates(keyID string, candidates []str
 		return "", fmt.Errorf("no candidate groups available")
 	}
 
-	if selector, exists := m.groupSelectors[keyID]; exists {
-		return selector.SelectGroupFromCandidates(candidates)
+	selectableGroups := m.selectableGroupsForKeyLocked(key)
+	if len(selectableGroups) == 0 {
+		return "", fmt.Errorf("no enabled groups available")
 	}
 
-	if len(key.AllowedGroups) == 1 {
-		for _, candidate := range candidates {
-			if candidate == key.AllowedGroups[0] {
-				return candidate, nil
-			}
-		}
-		return "", fmt.Errorf("single allowed group is not in candidate groups")
+	candidateSet := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		candidateSet[candidate] = struct{}{}
 	}
 
-	if len(key.AllowedGroups) > 1 {
-		allowedSet := make(map[string]struct{}, len(key.AllowedGroups))
-		for _, groupID := range key.AllowedGroups {
-			allowedSet[groupID] = struct{}{}
+	filteredCandidates := make([]string, 0, len(candidates))
+	for _, groupID := range selectableGroups {
+		if _, ok := candidateSet[groupID]; ok {
+			filteredCandidates = append(filteredCandidates, groupID)
 		}
-		for _, candidate := range candidates {
-			if _, ok := allowedSet[candidate]; ok {
-				return candidate, nil
-			}
-		}
+	}
+
+	if len(filteredCandidates) == 0 {
 		return "", fmt.Errorf("no candidate groups match allowed groups")
 	}
-
-	if m.configProvider != nil {
-		enabledGroups := m.configProvider.GetEnabledGroups()
-		for _, candidate := range candidates {
-			if _, ok := enabledGroups[candidate]; ok {
-				return candidate, nil
-			}
-		}
+	if len(selectableGroups) == 1 {
+		return filteredCandidates[0], nil
 	}
 
-	return candidates[0], nil
+	if selector := m.ensureSelectorLocked(keyID, key); selector != nil {
+		return selector.SelectGroupFromCandidates(filteredCandidates)
+	}
+
+	return filteredCandidates[0], nil
 }
 
 func (m *Manager) GetGroupUsageStats(keyID string) (map[string]GroupUsageStats, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key, exists := m.keys[keyID]
+	if !exists {
+		return nil, fmt.Errorf("key not found")
+	}
+
+	m.refreshSelectorLocked(keyID, key)
 
 	if selector, exists := m.groupSelectors[keyID]; exists {
 		return selector.GetUsageStats(), nil
@@ -819,6 +748,95 @@ func (m *Manager) getSortedEnabledGroupIDs() []string {
 	}
 	sort.Strings(groupIDs)
 	return groupIDs
+}
+
+// RefreshSelectors rebuilds cached group selectors against the latest enabled-group config.
+func (m *Manager) RefreshSelectors() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for keyID, key := range m.keys {
+		m.refreshSelectorLocked(keyID, key)
+	}
+}
+
+func (m *Manager) ensureSelectorLocked(keyID string, key *ProxyKey) *GroupSelector {
+	m.refreshSelectorLocked(keyID, key)
+	return m.groupSelectors[keyID]
+}
+
+func (m *Manager) selectableGroupsForKeyLocked(key *ProxyKey) []string {
+	if key == nil || !key.IsActive {
+		return nil
+	}
+
+	if len(key.AllowedGroups) == 0 {
+		return append([]string(nil), m.getSortedEnabledGroupIDs()...)
+	}
+
+	if m.configProvider == nil {
+		return append([]string(nil), key.AllowedGroups...)
+	}
+
+	enabledSet := make(map[string]struct{})
+	for _, groupID := range m.getSortedEnabledGroupIDs() {
+		enabledSet[groupID] = struct{}{}
+	}
+
+	selectable := make([]string, 0, len(key.AllowedGroups))
+	for _, groupID := range key.AllowedGroups {
+		if _, ok := enabledSet[groupID]; ok {
+			selectable = append(selectable, groupID)
+		}
+	}
+	return selectable
+}
+
+func selectorMatches(selector *GroupSelector, allowedGroups []string, config *GroupSelectionConfig) bool {
+	if selector == nil {
+		return false
+	}
+
+	selector.mutex.RLock()
+	defer selector.mutex.RUnlock()
+
+	return stringSlicesEqual(selector.allowedGroups, allowedGroups) &&
+		groupSelectionConfigEqual(selector.config, config)
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func groupSelectionConfigEqual(a, b *GroupSelectionConfig) bool {
+	normalizedA := normalizedGroupSelectionConfig(a)
+	normalizedB := normalizedGroupSelectionConfig(b)
+	return reflect.DeepEqual(normalizedA, normalizedB)
+}
+
+func normalizedGroupSelectionConfig(cfg *GroupSelectionConfig) GroupSelectionConfig {
+	if cfg == nil {
+		return GroupSelectionConfig{Strategy: GroupSelectionRoundRobin}
+	}
+
+	normalized := GroupSelectionConfig{
+		Strategy: cfg.Strategy,
+	}
+	if normalized.Strategy == "" {
+		normalized.Strategy = GroupSelectionRoundRobin
+	}
+	if len(cfg.GroupWeights) > 0 {
+		normalized.GroupWeights = append([]GroupWeight(nil), cfg.GroupWeights...)
+	}
+	return normalized
 }
 
 // generateID generates a unique ID.

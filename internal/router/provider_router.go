@@ -79,8 +79,13 @@ func (pr *ProviderRouter) Route(req *RouteRequest) (*RouteResult, error) {
 	} else {
 		// 2. 根据模型名称和代理密钥权限自动路由
 		if req.ProxyKeyID != "" && pr.proxyKeyManager != nil {
-			// 使用代理密钥的分组选择策略
-			selectedGroupID, err := pr.proxyKeyManager.SelectGroupForKey(req.ProxyKeyID)
+			candidateGroups := pr.GetGroupsForModel(req.Model, req.AllowedGroups, req.EnforceModelMappings)
+			if len(candidateGroups) == 0 {
+				return nil, fmt.Errorf("no suitable provider group found for model '%s' with current permissions", req.Model)
+			}
+
+			// 只在当前模型可用的候选分组内选择，避免选到不支持该模型的组。
+			selectedGroupID, err := pr.proxyKeyManager.SelectGroupForKeyFromCandidates(req.ProxyKeyID, candidateGroups)
 			if err != nil {
 				return nil, fmt.Errorf("failed to select group for proxy key: %w", err)
 			}
@@ -128,7 +133,8 @@ func (pr *ProviderRouter) Route(req *RouteRequest) (*RouteResult, error) {
 // routeByModel 根据模型名称路由
 func (pr *ProviderRouter) routeByModel(modelName string) (*internal.UserGroup, string) {
 	// 1. 首先检查是否有分组明确支持该模型
-	for groupID, group := range pr.config.UserGroups {
+	for _, groupID := range pr.getSortedGroupIDs() {
+		group := pr.config.UserGroups[groupID]
 		if !group.Enabled {
 			continue
 		}
@@ -176,7 +182,8 @@ func (pr *ProviderRouter) routeByModelPattern(modelName string) (*internal.UserG
 	}
 
 	// 查找匹配提供商类型的分组
-	for groupID, group := range pr.config.UserGroups {
+	for _, groupID := range pr.getSortedGroupIDs() {
+		group := pr.config.UserGroups[groupID]
 		if group.Enabled && group.ProviderType == targetProviderType {
 			// 如果分组没有指定模型列表，或者模型列表为空，则认为支持所有该类型的模型
 			if len(group.Models) == 0 {
@@ -191,7 +198,8 @@ func (pr *ProviderRouter) routeByModelPattern(modelName string) (*internal.UserG
 
 // getFirstEnabledGroup 获取第一个启用的分组
 func (pr *ProviderRouter) getFirstEnabledGroup() (*internal.UserGroup, string) {
-	for groupID, group := range pr.config.UserGroups {
+	for _, groupID := range pr.getSortedGroupIDs() {
+		group := pr.config.UserGroups[groupID]
 		if group.Enabled {
 			return group, groupID
 		}
@@ -576,7 +584,11 @@ func (pr *ProviderRouter) routeByModelWithPermissions(modelName string, allowedG
 	}
 
 	// 首先尝试精确匹配模型
-	for groupID, group := range pr.config.UserGroups {
+	for _, groupID := range accessibleGroups {
+		group := pr.config.UserGroups[groupID]
+		if group == nil {
+			continue
+		}
 		if !group.Enabled {
 			continue
 		}
@@ -609,7 +621,11 @@ func (pr *ProviderRouter) routeByModelWithPermissions(modelName string, allowedG
 	}
 
 	// 查找匹配提供商类型的分组
-	for groupID, group := range pr.config.UserGroups {
+	for _, groupID := range accessibleGroups {
+		group := pr.config.UserGroups[groupID]
+		if group == nil {
+			continue
+		}
 		if !group.Enabled {
 			continue
 		}
@@ -633,12 +649,22 @@ func (pr *ProviderRouter) routeByModelWithPermissions(modelName string, allowedG
 
 // getFirstEnabledGroupWithPermissions 获取第一个有权限的启用分组
 func (pr *ProviderRouter) getFirstEnabledGroupWithPermissions(allowedGroups []string) (*internal.UserGroup, string) {
-	for groupID, group := range pr.config.UserGroups {
-		if group.Enabled && pr.hasGroupAccess(allowedGroups, groupID) {
+	for _, groupID := range pr.getAccessibleGroups(allowedGroups) {
+		group := pr.config.UserGroups[groupID]
+		if group != nil && group.Enabled {
 			return group, groupID
 		}
 	}
 	return nil, ""
+}
+
+func (pr *ProviderRouter) getSortedGroupIDs() []string {
+	groupIDs := make([]string, 0, len(pr.config.UserGroups))
+	for groupID := range pr.config.UserGroups {
+		groupIDs = append(groupIDs, groupID)
+	}
+	sort.Strings(groupIDs)
+	return groupIDs
 }
 
 // inferProviderTypeFromModel 从模型名称推断提供商类型

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -23,14 +24,14 @@ type DuplicateKeyInfo struct {
 
 // GroupKeyManager 分组密钥管理器
 type GroupKeyManager struct {
-	groupID             string
-	groupName           string
-	keys                []string
-	keyInfos            map[string]*KeyInfo
-	keyStatuses         map[string]*KeyStatus
-	rotationStrategy    string
-	currentIndex        int
-	mutex               sync.RWMutex
+	groupID          string
+	groupName        string
+	keys             []string
+	keyInfos         map[string]*KeyInfo
+	keyStatuses      map[string]*KeyStatus
+	rotationStrategy string
+	currentIndex     int
+	mutex            sync.RWMutex
 	// 密钥管理策略配置
 	disablePermanentBan bool // 禁用永久禁用策略
 	maxErrorCount       int  // 触发禁用的最大错误次数
@@ -143,15 +144,24 @@ func (gkm *GroupKeyManager) getActiveKeys() []string {
 	var activeKeys []string
 	now := time.Now()
 	for _, key := range gkm.keys {
-		if status, exists := gkm.keyStatuses[key]; exists && status.IsActive {
-			// 检查是否在限流冷却期内
-			if !status.RateLimitUntil.IsZero() && now.Before(status.RateLimitUntil) {
-				continue // 跳过在限流冷却期内的密钥
-			}
+		if status, exists := gkm.keyStatuses[key]; exists && gkm.isStatusSelectable(status, now) {
 			activeKeys = append(activeKeys, key)
 		}
 	}
 	return activeKeys
+}
+
+func (gkm *GroupKeyManager) isStatusSelectable(status *KeyStatus, now time.Time) bool {
+	if status == nil || !status.IsActive {
+		return false
+	}
+	if status.IsValid != nil && !*status.IsValid {
+		return false
+	}
+	if !status.RateLimitUntil.IsZero() && now.Before(status.RateLimitUntil) {
+		return false
+	}
+	return true
 }
 
 // roundRobinSelection 轮询选择
@@ -170,7 +180,7 @@ func (gkm *GroupKeyManager) roundRobinSelection(activeKeys []string) string {
 	for offset := 0; offset < len(gkm.keys); offset++ {
 		idx := (startIndex + offset) % len(gkm.keys)
 		key := gkm.keys[idx]
-		if status, exists := gkm.keyStatuses[key]; exists && status.IsActive {
+		if status, exists := gkm.keyStatuses[key]; exists && gkm.isStatusSelectable(status, time.Now()) {
 			gkm.currentIndex = (idx + 1) % len(gkm.keys)
 			return key
 		}
@@ -364,17 +374,7 @@ func (gkm *GroupKeyManager) IsKeyAvailable(apiKey string) bool {
 		return false
 	}
 
-	// 检查是否被禁用
-	if !status.IsActive {
-		return false
-	}
-
-	// 检查是否在限流冷却期内
-	if !status.RateLimitUntil.IsZero() && time.Now().Before(status.RateLimitUntil) {
-		return false
-	}
-
-	return true
+	return gkm.isStatusSelectable(status, time.Now())
 }
 
 // ResetDailyRateLimits 重置当天的限流计数（应在每天凌晨调用）
@@ -417,9 +417,10 @@ func (gkm *GroupKeyManager) GetGroupInfo() map[string]interface{} {
 
 	activeCount := 0
 	totalCount := len(gkm.keys)
+	now := time.Now()
 
 	for _, status := range gkm.keyStatuses {
-		if status.IsActive {
+		if gkm.isStatusSelectable(status, now) {
 			activeCount++
 		}
 	}
@@ -451,7 +452,10 @@ func getSafeKeySuffix(key string) string {
 
 // randomInt 生成随机整数
 func randomInt(max int) int {
-	return int(time.Now().UnixNano()) % max
+	if max <= 0 {
+		return 0
+	}
+	return rand.Intn(max)
 }
 
 // MultiGroupKeyManager 多分组密钥管理器
@@ -708,6 +712,8 @@ func (mgkm *MultiGroupKeyManager) ForceSetKeyStatus(groupID, apiKey string, isVa
 			status.IsActive = true
 			status.ErrorCount = 0
 			status.LastError = ""
+		} else {
+			status.IsActive = false
 		}
 
 		log.Printf("强制设置密钥状态: 分组=%s, 密钥=%s, 有效=%v, 原因=%s",
@@ -983,13 +989,12 @@ func (mgkm *MultiGroupKeyManager) loadKeyValidationStatusFromDB(groupID string, 
 			// 更新验证状态
 			if isValid, ok := status["is_valid"].(*bool); ok && isValid != nil {
 				keyStatus.IsValid = isValid
-				// 重要：只有当密钥有效时才设置为活跃状态，无效的密钥保持活跃以便重试
+				// 已知无效的密钥不应继续参与线上轮询。
 				if *isValid {
 					keyStatus.IsActive = true
 					validCount++
 				} else {
-					// 无效的密钥仍然保持活跃状态，但标记为无效
-					keyStatus.IsActive = true
+					keyStatus.IsActive = false
 					invalidCount++
 				}
 			}

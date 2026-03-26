@@ -15,6 +15,14 @@ func (s stubConfigProvider) GetEnabledGroups() map[string]interface{} {
 	return s.enabledGroups
 }
 
+type mutableConfigProvider struct {
+	enabledGroups map[string]interface{}
+}
+
+func (m *mutableConfigProvider) GetEnabledGroups() map[string]interface{} {
+	return m.enabledGroups
+}
+
 func TestRemoveGroupFromAllKeys_DisableIfNoExplicitGroupsRemain(t *testing.T) {
 	m := &Manager{
 		keys: map[string]*ProxyKey{
@@ -204,6 +212,93 @@ func TestManager_SelectGroupForKey_UnrestrictedFallsBackToSortedFirstGroup(t *te
 	}
 	if got != "cerebras" {
 		t.Fatalf("SelectGroupForKey() = %s, want cerebras", got)
+	}
+
+	got2, err := m.SelectGroupForKey("k1")
+	if err != nil {
+		t.Fatalf("SelectGroupForKey() second call error = %v", err)
+	}
+	if got2 != "openrouter" {
+		t.Fatalf("SelectGroupForKey() second call = %s, want openrouter", got2)
+	}
+}
+
+func TestManager_SelectGroupForKeyFromCandidates_RebuildsMissingSelector(t *testing.T) {
+	m := &Manager{
+		keys: map[string]*ProxyKey{
+			"k1": {
+				ID:            "k1",
+				Key:           "secret",
+				Name:          "key-1",
+				IsActive:      true,
+				AllowedGroups: []string{"g1", "g2", "g3"},
+				GroupSelectionConfig: &GroupSelectionConfig{
+					Strategy: GroupSelectionRoundRobin,
+				},
+			},
+		},
+		groupSelectors: make(map[string]*GroupSelector),
+	}
+
+	got1, err := m.SelectGroupForKeyFromCandidates("k1", []string{"g2", "g3"})
+	if err != nil {
+		t.Fatalf("SelectGroupForKeyFromCandidates() first call error = %v", err)
+	}
+	if got1 != "g2" {
+		t.Fatalf("SelectGroupForKeyFromCandidates() first call = %s, want g2", got1)
+	}
+
+	got2, err := m.SelectGroupForKeyFromCandidates("k1", []string{"g2", "g3"})
+	if err != nil {
+		t.Fatalf("SelectGroupForKeyFromCandidates() second call error = %v", err)
+	}
+	if got2 != "g3" {
+		t.Fatalf("SelectGroupForKeyFromCandidates() second call = %s, want g3", got2)
+	}
+}
+
+func TestManager_RefreshSelectorsUpdatesUnrestrictedSelectorOnConfigChange(t *testing.T) {
+	provider := &mutableConfigProvider{
+		enabledGroups: map[string]interface{}{
+			"g1": struct{}{},
+			"g2": struct{}{},
+		},
+	}
+	m := NewManagerWithConfig(nil, provider)
+
+	key, err := m.GenerateKeyWithPolicy("share", "test", []string{}, nil, false)
+	if err != nil {
+		t.Fatalf("GenerateKeyWithPolicy() error = %v", err)
+	}
+
+	got1, err := m.SelectGroupForKey(key.ID)
+	if err != nil {
+		t.Fatalf("SelectGroupForKey() initial error = %v", err)
+	}
+	if got1 != "g1" {
+		t.Fatalf("SelectGroupForKey() initial = %s, want g1", got1)
+	}
+
+	provider.enabledGroups = map[string]interface{}{
+		"g2": struct{}{},
+		"g3": struct{}{},
+	}
+	m.RefreshSelectors()
+
+	got2, err := m.SelectGroupForKey(key.ID)
+	if err != nil {
+		t.Fatalf("SelectGroupForKey() after refresh error = %v", err)
+	}
+	if got2 != "g2" {
+		t.Fatalf("SelectGroupForKey() after refresh = %s, want g2", got2)
+	}
+
+	got3, err := m.SelectGroupForKey(key.ID)
+	if err != nil {
+		t.Fatalf("SelectGroupForKey() second after refresh error = %v", err)
+	}
+	if got3 != "g3" {
+		t.Fatalf("SelectGroupForKey() second after refresh = %s, want g3", got3)
 	}
 }
 

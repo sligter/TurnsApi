@@ -322,6 +322,12 @@ func (gs *GroupSelector) UpdateConfig(config *GroupSelectionConfig) {
 	gs.mutex.Lock()
 	defer gs.mutex.Unlock()
 
+	if config == nil {
+		config = &GroupSelectionConfig{
+			Strategy: GroupSelectionRoundRobin,
+		}
+	}
+
 	gs.config = config
 	if config.Strategy == GroupSelectionWeighted && len(config.GroupWeights) > 0 {
 		gs.initWeightedSelector()

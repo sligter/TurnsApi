@@ -27,8 +27,8 @@ type KeyStatus struct {
 	LastValidated   *time.Time `json:"last_validated,omitempty"` // 最后验证时间
 	UsageCount      int64      `json:"usage_count"`
 	ErrorCount      int64      `json:"error_count"`
-	RateLimitCount  int64      `json:"rate_limit_count"`            // 限流次数（当天）
-	RateLimitUntil  time.Time  `json:"rate_limit_until,omitempty"`  // 限流冷却截止时间
+	RateLimitCount  int64      `json:"rate_limit_count"`             // 限流次数（当天）
+	RateLimitUntil  time.Time  `json:"rate_limit_until,omitempty"`   // 限流冷却截止时间
 	LastRateLimitAt time.Time  `json:"last_rate_limit_at,omitempty"` // 最后一次限流时间
 	LastError       string     `json:"last_error,omitempty"`
 	LastErrorTime   time.Time  `json:"last_error_time,omitempty"`
@@ -153,12 +153,26 @@ func (km *KeyManager) GetNextKey() (string, error) {
 // getActiveKeys 获取所有活跃的密钥
 func (km *KeyManager) getActiveKeys() []string {
 	var activeKeys []string
+	now := time.Now()
 	for _, key := range km.keys {
-		if status, exists := km.keyStatuses[key]; exists && status.IsActive {
+		if status, exists := km.keyStatuses[key]; exists && km.isStatusSelectable(status, now) {
 			activeKeys = append(activeKeys, key)
 		}
 	}
 	return activeKeys
+}
+
+func (km *KeyManager) isStatusSelectable(status *KeyStatus, now time.Time) bool {
+	if status == nil || !status.IsActive {
+		return false
+	}
+	if status.IsValid != nil && !*status.IsValid {
+		return false
+	}
+	if !status.RateLimitUntil.IsZero() && now.Before(status.RateLimitUntil) {
+		return false
+	}
+	return true
 }
 
 // roundRobinSelection 轮询选择
@@ -177,7 +191,7 @@ func (km *KeyManager) roundRobinSelection(activeKeys []string) string {
 	for offset := 0; offset < len(km.keys); offset++ {
 		idx := (startIndex + offset) % len(km.keys)
 		key := km.keys[idx]
-		if status, exists := km.keyStatuses[key]; exists && status.IsActive {
+		if status, exists := km.keyStatuses[key]; exists && km.isStatusSelectable(status, time.Now()) {
 			km.currentIndex = (idx + 1) % len(km.keys)
 			return key
 		}
