@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
 	"turnsapi/internal"
 	"turnsapi/internal/keymanager"
 	"turnsapi/internal/providers"
+	"turnsapi/internal/proxykey"
 	"turnsapi/internal/ratelimit"
 	"turnsapi/internal/router"
 
@@ -211,6 +213,42 @@ func TestHandleRequestWithSmartFailover_HonorsExplicitProviderGroup(t *testing.T
 
 	if got != "g2|g2k1" {
 		t.Fatalf("explicit provider group result = %q, want %q", got, "g2|g2k1")
+	}
+}
+
+func TestOrderCandidateGroups_ProxyKeySelectionRotatesWholeOrder(t *testing.T) {
+	manager := proxykey.NewManager()
+	key, err := manager.GenerateKeyWithConfig(
+		"test-key",
+		"",
+		[]string{"g1", "g2", "g3"},
+		&proxykey.GroupSelectionConfig{Strategy: proxykey.GroupSelectionRoundRobin},
+	)
+	if err != nil {
+		t.Fatalf("GenerateKeyWithConfig() error = %v", err)
+	}
+
+	proxy := &MultiProviderProxy{
+		proxyKeyManager: manager,
+		groupRotations:  make(map[string]int),
+	}
+
+	candidateGroups := []string{"g1", "g2", "g3"}
+	wantOrders := [][]string{
+		{"g1", "g2", "g3"},
+		{"g2", "g3", "g1"},
+		{"g3", "g1", "g2"},
+		{"g1", "g2", "g3"},
+	}
+
+	for i, want := range wantOrders {
+		got := proxy.orderCandidateGroups("gpt-4o-mini", &router.RouteRequest{
+			Model:      "gpt-4o-mini",
+			ProxyKeyID: key.ID,
+		}, candidateGroups)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("orderCandidateGroups() call %d = %v, want %v", i+1, got, want)
+		}
 	}
 }
 

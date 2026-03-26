@@ -532,7 +532,7 @@ func (p *MultiProviderProxy) rotateGroups(groups []string, start int) []string {
 	return rotated
 }
 
-func moveGroupToFront(groups []string, target string) []string {
+func rotateGroupsToStartAt(groups []string, target string) []string {
 	if len(groups) <= 1 || target == "" {
 		return append([]string(nil), groups...)
 	}
@@ -548,11 +548,10 @@ func moveGroupToFront(groups []string, target string) []string {
 		return append([]string(nil), groups...)
 	}
 
-	reordered := make([]string, 0, len(groups))
-	reordered = append(reordered, groups[index])
-	reordered = append(reordered, groups[:index]...)
-	reordered = append(reordered, groups[index+1:]...)
-	return reordered
+	rotated := make([]string, 0, len(groups))
+	rotated = append(rotated, groups[index:]...)
+	rotated = append(rotated, groups[:index]...)
+	return rotated
 }
 
 func (p *MultiProviderProxy) orderCandidateGroups(model string, routeReq *router.RouteRequest, candidateGroups []string) []string {
@@ -563,7 +562,9 @@ func (p *MultiProviderProxy) orderCandidateGroups(model string, routeReq *router
 	if routeReq != nil && routeReq.ProxyKeyID != "" && p.proxyKeyManager != nil {
 		selectedGroup, err := p.proxyKeyManager.SelectGroupForKeyFromCandidates(routeReq.ProxyKeyID, candidateGroups)
 		if err == nil && selectedGroup != "" {
-			return moveGroupToFront(candidateGroups, selectedGroup)
+			// Rotate the full candidate slice so the proxy-key-selected group starts
+			// the cycle while preserving fair fallback order across the remaining groups.
+			return rotateGroupsToStartAt(candidateGroups, selectedGroup)
 		}
 	}
 
