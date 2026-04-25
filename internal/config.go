@@ -175,7 +175,7 @@ func LoadConfig(configPath string) (*Config, error) {
 		config.GlobalSettings.DefaultRotationStrategy = "round_robin"
 	}
 	if config.GlobalSettings.DefaultTimeout == 0 {
-		config.GlobalSettings.DefaultTimeout = 30 * time.Second
+		config.GlobalSettings.DefaultTimeout = 1200 * time.Second
 	}
 	if config.GlobalSettings.DefaultMaxRetries == 0 {
 		config.GlobalSettings.DefaultMaxRetries = 3

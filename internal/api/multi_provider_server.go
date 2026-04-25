@@ -1499,25 +1499,23 @@ func (s *MultiProviderServer) validateKeyWithRetry(groupID, apiKey, testModel st
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		log.Printf("🔄 密钥验证尝试 %d/%d: %s", attempt, maxRetries, maskedKey)
 
-		// 创建提供商配置，强制使用300秒超时进行验证
 		providerConfig := &providers.ProviderConfig{
 			BaseURL:         group.BaseURL,
 			APIKey:          apiKey,
-			Timeout:         time.Duration(300) * time.Second, // 强制300秒超时，忽略分组配置
+			Timeout:         group.Timeout,
 			MaxRetries:      1,
 			Headers:         group.Headers,
 			ProviderType:    group.ProviderType,
 			UseResponsesAPI: group.UseResponsesAPI,
 		}
 
-		log.Printf("📋 提供商配置: BaseURL=%s, ProviderType=%s, Timeout=300s (强制设置)",
+		log.Printf("📋 提供商配置: BaseURL=%s, ProviderType=%s, Timeout=%v",
 			func() string {
 				if group.BaseURL != "" {
 					return group.BaseURL
 				}
 				return "默认"
-			}(), group.ProviderType)
-		log.Printf("📝 注意: 分组原始超时=%v, 验证时强制使用300s", group.Timeout)
+			}(), group.ProviderType, group.Timeout)
 
 		// 获取提供商实例
 		providerID := fmt.Sprintf("%s_validate_%s_%d", groupID, apiKey[:min(8, len(apiKey))], attempt)
@@ -1534,7 +1532,7 @@ func (s *MultiProviderServer) validateKeyWithRetry(groupID, apiKey, testModel st
 
 		// 验证密钥
 		log.Printf("🚀 发送测试请求到 %s 模型...", testModel)
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), group.Timeout)
 
 		startTime := time.Now()
 		response, err := provider.ChatCompletion(ctx, &providers.ChatCompletionRequest{

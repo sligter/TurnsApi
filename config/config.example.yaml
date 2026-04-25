@@ -15,7 +15,7 @@ auth:
 # 全局设置
 global_settings:
   default_rotation_strategy: "round_robin"  # 默认轮询策略
-  default_timeout: "300s"
+  default_timeout: "1200s"
   default_max_retries: 3
 
 # 监控配置（不影响启动速度）

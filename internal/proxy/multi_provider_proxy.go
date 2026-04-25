@@ -1126,8 +1126,7 @@ func (p *MultiProviderProxy) handleNonStreamingRequest(
 	apiKey string,
 	startTime time.Time,
 ) bool {
-	// 创建带有长超时的context，避免请求超时
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), routeResult.ProviderConfig.Timeout)
 	defer cancel()
 
 	// 应用模型名称映射
@@ -1209,8 +1208,7 @@ func (p *MultiProviderProxy) handleStreamingRequest(
 	apiKey string,
 	startTime time.Time,
 ) bool {
-	// 创建带有长超时的context，避免流式请求超时
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), routeResult.ProviderConfig.Timeout)
 	defer cancel()
 
 	// 应用模型名称映射
